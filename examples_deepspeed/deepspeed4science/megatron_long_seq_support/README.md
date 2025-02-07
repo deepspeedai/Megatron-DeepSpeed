@@ -23,8 +23,8 @@ Resolved Issues:
 
 ```shell
 # clone source code
-git clone https://github.com/microsoft/DeepSpeed.git
-git clone https://github.com/microsoft/Megatron-DeepSpeed.git
+git clone https://github.com/deepspeedai/DeepSpeed.git
+git clone https://github.com/deepspeedai/Megatron-DeepSpeed.git
 git clone https://github.com/NVIDIA/apex
 
 # creat a new virtual environment

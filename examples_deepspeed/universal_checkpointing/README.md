@@ -73,9 +73,9 @@ bash examples_deepspeed/universal_checkpointing/megatron_gpt/run_universal_bf16.
 ```
 This resumption script effects the loading of universal checkpoint rather than the ZeRO checkpoint in the folder by passing `--universal-checkpoint` command line flag to the main training script (i.e., `pretrain_gpt.py`). 
 
-Please see the corresponding [pull request](https://github.com/microsoft/Megatron-DeepSpeed/pull/276) for visualizations of matching loss values between original and universal checkpoint runs for bf16 and fp16 examples.
+Please see the corresponding [pull request](https://github.com/deepspeedai/Megatron-DeepSpeed/pull/276) for visualizations of matching loss values between original and universal checkpoint runs for bf16 and fp16 examples.
 
-Combining sequence parallelism with data parallelism is another good use case for universal checkpointing, see [sp pull request](https://github.com/microsoft/DeepSpeed/pull/4752) for example and visualization of matching loss values.
+Combining sequence parallelism with data parallelism is another good use case for universal checkpointing, see [sp pull request](https://github.com/deepspeedai/DeepSpeed/pull/4752) for example and visualization of matching loss values.
 
 Notes: The model weights using the ```--no-pipeline-parallel``` parameter and the model weights not using the ```--no-pipeline-parallel``` parameter are currently not supported for mutual conversion.
 

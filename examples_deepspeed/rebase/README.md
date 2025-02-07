@@ -1,7 +1,7 @@
 # July 2023 sync with NVIDIA/Megatron-LM
 This folder includes details about the recent sync with the NVIDIA/Megatron-LM repo (where this repo is forked from). It includes example scripts we used to test after the sync, together with this README documentation about what were tested.
 
-We also created a [backup branch](https://github.com/microsoft/Megatron-DeepSpeed/tree/before_rebase) which is the version before this sync. This branch is just for comparison tests and for temporary use when debugging the main branch. We do not plan to continue supporting the version before sync.
+We also created a [backup branch](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/before_rebase) which is the version before this sync. This branch is just for comparison tests and for temporary use when debugging the main branch. We do not plan to continue supporting the version before sync.
 
 ## List of rebase efforts/achievements
 * Enabling Megatron-LM's sequence parallel.
@@ -26,7 +26,7 @@ In addition, below is a performance/convergence comparison between before and af
 
 | Case | TFLOPs (per GPU) | Validation loss at step 200 | Training script |
 | ---- | ---------------- | --------------------------- | --------------- |
-| Before sync, GPT-3 13B, 3D parallelism | 50 | 5.73 | [script (in the backup branch)](https://github.com/microsoft/Megatron-DeepSpeed/blob/before_rebase/examples/before_rebase_test/ds_pretrain_gpt_13B.sh) |
+| Before sync, GPT-3 13B, 3D parallelism | 50 | 5.73 | [script (in the backup branch)](https://github.com/deepspeedai/Megatron-DeepSpeed/blob/before_rebase/examples/before_rebase_test/ds_pretrain_gpt_13B.sh) |
 | After sync, GPT-3 13B, 3D parallelism | 55.6 | 5.71 | [script](ds_pretrain_gpt_13B.sh) |
 
 At last, we provide a [toy example script](ds_pretrain_gpt_125M.sh) that users can try as the first test.
@@ -44,4 +44,4 @@ We also tested and verified that the Rotary Positional Embedding (RoPE) introduc
 
 ## Notes/TODOs
 * After the sync, DeepSpeed still relies on the older activation checkpointing mechanism (see function ```_checkpointed_forward``` in ```Megatron-DeepSpeed/megatron/model/transformer.py```) since we didn't have time to integrate with the new version yet. Contribution is very welcomed.
-* (Aug 2023 update) With the contribution from 3P users (https://github.com/microsoft/Megatron-DeepSpeed/pull/225), now it's also possible to use Megatron-LM's newer activation checkpointing mechanism. However, currently it's still not compatible with DeepSpeed, so you won't be able to combine it with any DeepSpeed technologies. We DeepSpeed team compared the [older mechanism](ds_pretrain_gpt_1.3B.sh) and [newer mechanism](ds_pretrain_gpt_1.3B_megatron_checkpointing.sh) on 1 DGX-2 node (16 V100), and found that the older mechanism has less memory saving (older max allocated 15241 MB, newer 12924 MB) and higher throughput (older 23.11 TFLOPs newer 17.26 TFLOPs). Thus currently we still recommend using the older mechanism both because of the similar checkpointing performance, and (more importantly) because only older mechnaism is compatible with DeepSpeed (and in this case you can combine with ZeRO to achieve more memeory saving).
+* (Aug 2023 update) With the contribution from 3P users (https://github.com/deepspeedai/Megatron-DeepSpeed/pull/225), now it's also possible to use Megatron-LM's newer activation checkpointing mechanism. However, currently it's still not compatible with DeepSpeed, so you won't be able to combine it with any DeepSpeed technologies. We DeepSpeed team compared the [older mechanism](ds_pretrain_gpt_1.3B.sh) and [newer mechanism](ds_pretrain_gpt_1.3B_megatron_checkpointing.sh) on 1 DGX-2 node (16 V100), and found that the older mechanism has less memory saving (older max allocated 15241 MB, newer 12924 MB) and higher throughput (older 23.11 TFLOPs newer 17.26 TFLOPs). Thus currently we still recommend using the older mechanism both because of the similar checkpointing performance, and (more importantly) because only older mechnaism is compatible with DeepSpeed (and in this case you can combine with ZeRO to achieve more memeory saving).
