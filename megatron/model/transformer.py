@@ -510,7 +510,14 @@ class ParallelAttention(MegatronModule):
     Self-attention layer takes input with size [s, b, h]
     and returns output of the same size.
     """
-
+    sp_stream=None
+    
+    def get_sp_stream(self):
+        if not self.ds_sp_overlap:
+            return None
+        if ParallelAttention.sp_stream is None:
+            ParallelAttention.sp_stream=get_accelerator().Stream()
+        return ParallelAttention.sp_stream
     def __init__(self, config, layer_number,
                  attention_type=AttnType.self_attn,
                  attn_mask_type=AttnMaskType.padding):
@@ -524,7 +531,8 @@ class ParallelAttention(MegatronModule):
         self.num_attention_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.use_gqa = (self.num_attention_heads != self.num_key_value_heads)
-
+        self.split_qkv = args.split_qkv_linear
+        self.ds_sp_overlap = args.ds_sequence_parallel_overlap_comm
         self.use_flash_attn = (args.use_flash_attn_v1 or args.use_flash_attn_triton or args.use_flash_attn_v2 or \
             args.use_flash_attn_builder) \
             and attention_type == AttnType.self_attn \
@@ -577,13 +585,31 @@ class ParallelAttention(MegatronModule):
 
         # Strided linear layer.
         if attention_type == AttnType.self_attn:
-            self.query_key_value = tensor_parallel.ColumnParallelLinear(
-                config.hidden_size,
-                projection_size + 2 * kv_projection_size,
-                config=config,
-                init_method=config.init_method,
-                bias=args.add_bias_linear,
-                gather_output=False)
+            if not self.split_qkv:
+                self.query_key_value = tensor_parallel.ColumnParallelLinear(
+                    config.hidden_size,
+                    projection_size + 2 * kv_projection_size,
+                    config=config,
+                    init_method=config.init_method,
+                    bias=args.add_bias_linear,
+                    gather_output=False)
+            
+            else:
+                linear_configs = [
+                    ("query_linear", projection_size),
+                    ("key_linear", kv_projection_size),
+                    ("value_linear", kv_projection_size),
+                ]
+
+                for attr_name, output_size in linear_configs:
+                    setattr(self, attr_name, tensor_parallel.ColumnParallelLinear(
+                        config.hidden_size,
+                        output_size,
+                        config=config,
+                        init_method=config.init_method,
+                        bias=args.add_bias_linear,
+                        gather_output=False
+                    ))
         else:
             assert attention_type == AttnType.cross_attn
             self.query = tensor_parallel.ColumnParallelLinear(
@@ -614,12 +640,14 @@ class ParallelAttention(MegatronModule):
         self.enable_ds_sequence_parallel = parallel_state.get_sequence_parallel_world_size() > 1 \
                                            or args.force_ds_sequence_parallel
         if self.enable_ds_sequence_parallel:
+
             assert dist_attn_supported, 'Distributed attention is not supported in this DeepSpeed version'
             assert args.num_attention_heads % parallel_state.get_sequence_parallel_world_size() == 0
+
             self.dist_attn = DistributedAttention(
                 local_attn, 
                 parallel_state.get_sequence_parallel_group(), 
-                gather_idx=1 if args.use_flash_attn_v1 or args.use_flash_attn_v2 else 0) 
+                gather_idx=1 if args.use_flash_attn_v1 or args.use_flash_attn_v2 else 0,sp_stream=self.get_sp_stream()) 
             # flash_attn_cuda assumes [b, s, nh, hd] layout, we need to make sure all2all gathers into the correct sequence dimension.
         else:
             if self.use_flash_attn:
@@ -636,7 +664,9 @@ class ParallelAttention(MegatronModule):
             init_method=config.output_layer_init_method,
             bias=args.add_bias_linear,
             input_is_parallel=True,
-            skip_bias_add=True)
+            skip_bias_add=True,
+            ds_sp_async_stream=self.get_sp_stream()
+            )
 
 
     def _checkpointed_attention_forward(self, query_layer, key_layer,
@@ -722,22 +752,41 @@ class ParallelAttention(MegatronModule):
         # Query, Key, and Value
         # =====================
         if self.attention_type == AttnType.self_attn:
-            # Attention heads [sq, b, h] --> [sq, b, ((nq + 2 * nkv) * hn)]
-            mixed_x_layer, _ = self.query_key_value(hidden_states)
-            
-            if self.enable_ds_sequence_parallel:
-                assert self.projection_size == self.kv_projection_size
-                seq_len, bs = mixed_x_layer.shape[0], mixed_x_layer.shape[1]
-                query_layer = mixed_x_layer[:, :, :self.projection_size].reshape(seq_len, bs, -1, self.head_dim)
-                key_layer = mixed_x_layer[:, :, self.projection_size:self.projection_size+self.kv_projection_size].reshape(seq_len, bs, -1, self.head_dim)
-                value_layer = mixed_x_layer[:, :, self.projection_size+self.kv_projection_size:].reshape(seq_len, bs, -1, self.head_dim)
-            if self.sequence_parallel or not self.enable_ds_sequence_parallel:
-                seq_len, bs = mixed_x_layer.shape[0], mixed_x_layer.shape[1]
-                each_hidden_size = mixed_x_layer.shape[-1] // 3
-                query_layer = mixed_x_layer[:, :, :each_hidden_size].reshape(seq_len, bs, -1, self.head_dim)
-                key_layer = mixed_x_layer[:, :, each_hidden_size:each_hidden_size+each_hidden_size].reshape(seq_len, bs, -1, self.head_dim)
-                value_layer = mixed_x_layer[:, :, each_hidden_size+each_hidden_size:].reshape(seq_len, bs, -1, self.head_dim)
-
+            if not self.split_qkv:
+                # Attention heads [sq, b, h] --> [sq, b, ((nq + 2 * nkv) * hn)]
+                mixed_x_layer, _ = self.query_key_value(hidden_states)
+                
+                if self.enable_ds_sequence_parallel:
+                    assert self.projection_size == self.kv_projection_size
+                    seq_len, bs = mixed_x_layer.shape[0], mixed_x_layer.shape[1]
+                    query_layer = mixed_x_layer[:, :, :self.projection_size].reshape(seq_len, bs, -1, self.head_dim)
+                    key_layer = mixed_x_layer[:, :, self.projection_size:self.projection_size+self.kv_projection_size].reshape(seq_len, bs, -1, self.head_dim)
+                    value_layer = mixed_x_layer[:, :, self.projection_size+self.kv_projection_size:].reshape(seq_len, bs, -1, self.head_dim)
+                if self.sequence_parallel or not self.enable_ds_sequence_parallel:
+                    seq_len, bs = mixed_x_layer.shape[0], mixed_x_layer.shape[1]
+                    each_hidden_size = mixed_x_layer.shape[-1] // 3
+                    query_layer = mixed_x_layer[:, :, :each_hidden_size].reshape(seq_len, bs, -1, self.head_dim)
+                    key_layer = mixed_x_layer[:, :, each_hidden_size:each_hidden_size+each_hidden_size].reshape(seq_len, bs, -1, self.head_dim)
+                    value_layer = mixed_x_layer[:, :, each_hidden_size+each_hidden_size:].reshape(seq_len, bs, -1, self.head_dim)
+            else:
+                assert self.ds_sp_overlap, """
+                    Currently, the split_qkv operation is only applicable 
+                    when ds_sp_overlap is enabled.
+                """
+                self.get_sp_stream().wait_stream(get_accelerator().current_stream())
+                with get_accelerator().stream(self.get_sp_stream()):
+                    query_layer,_ = self.query_linear(hidden_states)
+                    query_layer=query_layer.reshape(query_layer.shape[0],query_layer.shape[1],self.num_attention_heads,-1)
+                    fwd_query_layer_done_event = get_accelerator().Event()
+                    fwd_query_layer_done_event.record(self.get_sp_stream())
+                    key_layer,_ = self.key_linear(hidden_states)
+                    key_layer=key_layer.reshape(key_layer.shape[0],key_layer.shape[1],self.num_attention_heads,-1)
+                    
+                    fwd_key_layer_done_event = get_accelerator().Event()
+                    fwd_key_layer_done_event.record(self.get_sp_stream())
+                    value_layer,_ = self.value_linear(hidden_states)
+                    value_layer=value_layer.reshape(value_layer.shape[0],value_layer.shape[1],self.num_attention_heads,-1)
+               
             # Repeat kv
             if self.use_gqa:
                 key_layer = self.repeat_kv(key_layer, self.num_key_value_groups)
@@ -833,6 +882,9 @@ class ParallelAttention(MegatronModule):
             # value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)
 
         if self.enable_ds_sequence_parallel:
+            if self.ds_sp_overlap:
+                key_layer.done_event=fwd_key_layer_done_event
+                query_layer.done_event=fwd_query_layer_done_event
             batch_dim_idx = 1
             if self.use_flash_attn:
                 if not self.use_flash_attn_triton:

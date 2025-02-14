@@ -97,7 +97,9 @@ def validate_args(args, defaults={}):
         
     if args.ds_sequence_parallel_size > 1:
         assert version.parse(deepspeed.__version__) >= version.parse("0.10.2"), "sequence parallelism requires DeepSpeed version 0.10.2+"
-
+    if args.ds_sequence_parallel_overlap_comm:
+        assert args.split_qkv_linear, \
+            "ds_sequence_parallel_overlap_comm requires split_qkv_linear is True"
     model_parallel_size = args.pipeline_model_parallel_size * \
                           args.tensor_model_parallel_size * \
                           args.ds_sequence_parallel_size
@@ -924,6 +926,9 @@ def _add_training_args(parser):
     group.add_argument('--disable-moe-top2-2nd-expert-sampling', action='store_false',
                        help='Disable MoE top2 sampling of the 2nd expert. Instead of sampling, use argmax.',
                        dest='moe_top2_2nd_expert_sampling')
+    group.add_argument('--split-qkv-linear', action='store_true',
+                       help='Separate linear computations for query, key, and value.',
+                       dest='split_qkv_linear')
     group.add_argument('--use-flash-attn', '--use-flash-attn-v1', dest='use_flash_attn_v1', action='store_true',
                        help='use first version FlashAttention implementation of attention. '
                        'https://arxiv.org/abs/2205.14135')
@@ -975,14 +980,15 @@ def _add_training_args(parser):
                        help='Enable DeepSpeed\'s sequence parallel. Cannot be combined with "--sequence-parallel", which enables Megatron-LM\'s sequence parallel.')
     group.add_argument('--force-ds-sequence-parallel', action='store_true',
                        help='use DeepSpeed sequence parallelism regardless of sequence parallel size.')
-    
+    group.add_argument('--ds-sequence-parallel-overlap-comm', action='store_true',
+                       help='overlap comm for ds-sequence-parallel',
+                       dest='ds_sequence_parallel_overlap_comm')
     group.add_argument('--ds-sequence-parallel-fpdt', action='store_true',
                        help='use DeepSpeed sequence parallelism with FPDT.')
     group.add_argument('--ds-sequence-parallel-fpdt-chunk-size', type=int, default=65536,
                        help='Chunk size used in FPDT attention.')
     group.add_argument('--ds-sequence-parallel-fpdt-offloading', action='store_true',
                        help='use DeepSpeed sequence parallelism FPDT with offloading.')
-
     group.add_argument('--no-gradient-accumulation-fusion',
                        action='store_false',
                        help='Disable fusing gradient accumulation to weight '
