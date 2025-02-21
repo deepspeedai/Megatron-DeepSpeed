@@ -285,7 +285,7 @@ def get_deepspeed_config():
         CHECKPOINT_DATA_PARALLEL,
         CHECKPOINT_WRITER_DECOUPLED
     )
-    from deepspeed.runtime.swap_tensor.constants import AIO_THREAD_COUNT
+    from deepspeed.runtime.swap_tensor.constants import AIO_INTRA_OP_PARALLELISM
 
     args = get_args()
     replace_dict = {
@@ -294,7 +294,7 @@ def get_deepspeed_config():
         CHECKPOINT_IO_BUFFER_SIZE: args.checkpoint_io_buffer_size,
         CHECKPOINT_DATA_PARALLEL: args.checkpoint_data_parallel,
         CHECKPOINT_WRITER_DECOUPLED: args.checkpoint_writer_decoupled,
-        AIO_THREAD_COUNT: args.aio_thread_count
+        AIO_INTRA_OP_PARALLELISM: args.aio_intra_op_parallelism
     }
 
     with open(args.deepspeed_config, 'r') as fd:

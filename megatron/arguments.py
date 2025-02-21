@@ -939,8 +939,8 @@ def _add_fast_checkpointing_args(parser):
                         help="Fast checkpointing I/O buffer size")
     group.add_argument('--checkpoint-data-parallel', type=str, default=None,
                         help='Fast checkpointing data parallelism mode.')
-    group.add_argument('--aio-thread-count', type=int, default=None,
-                        help='AIO intra-parallelsm.')
+    group.add_argument('--aio-intra-op-parallelism', type=int, default=None,
+                        help='AIO intra op parallelsm.')
     group.add_argument('--checkpoint-writer-decoupled', action='store_true',
                         help='Decoupled checkpointing.')
     return parser
