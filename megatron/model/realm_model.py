@@ -5,14 +5,14 @@ from megatron import get_args, print_rank_0
 from megatron.checkpointing import get_checkpoint_tracker_filename, get_checkpoint_name
 from megatron.model import BertModel
 from .module import MegatronModule
-from megatron import mpu
+from megatron.core import mpu
 from megatron.model.enums import AttnMaskType
 from megatron.model.utils import get_linear_layer
 from megatron.model.utils import init_method_normal
 from megatron.model.language_model import get_language_model
 from megatron.model.utils import scaled_init_method_normal
 from megatron.model.bert_model import bert_extended_attention_mask, bert_position_ids
-
+from deepspeed.accelerator import get_accelerator
 
 def general_ict_model_provider(only_query_model=False, only_block_model=False):
     """Build the model."""
@@ -72,7 +72,7 @@ class ICTBertModel(MegatronModule):
     def embed_query(self, query_tokens, query_attention_mask):
         """Embed a batch of tokens using the query model"""
         if self.use_query_model:
-            query_types = torch.cuda.LongTensor(*query_tokens.shape).fill_(0)
+            query_types = get_accelerator().LongTensor(*query_tokens.shape).fill_(0)
             query_ict_logits, _ = self.query_model.forward(query_tokens, query_attention_mask, query_types)
             return query_ict_logits
         else:
@@ -81,24 +81,24 @@ class ICTBertModel(MegatronModule):
     def embed_block(self, block_tokens, block_attention_mask):
         """Embed a batch of tokens using the block model"""
         if self.use_block_model:
-            block_types = torch.cuda.LongTensor(*block_tokens.shape).fill_(0)
+            block_types = get_accelerator().LongTensor(*block_tokens.shape).fill_(0)
             block_ict_logits, _ = self.block_model.forward(block_tokens, block_attention_mask, block_types)
             return block_ict_logits
         else:
             raise ValueError("Cannot embed block without block model.")
 
-    def state_dict_for_save_checkpoint(self, destination=None, prefix='', keep_vars=False):
+    def state_dict_for_save_checkpoint(self, prefix='', keep_vars=False):
         """Save dict with state dicts of each of the models."""
         state_dict_ = {}
         if self.use_query_model:
             state_dict_[self._query_key] \
                 = self.query_model.state_dict_for_save_checkpoint(
-                destination, prefix, keep_vars)
+                    prefix=prefix, keep_vars=keep_vars)
 
         if self.use_block_model:
             state_dict_[self._block_key] \
                 = self.block_model.state_dict_for_save_checkpoint(
-                destination, prefix, keep_vars)
+                    prefix=prefix, keep_vars=keep_vars)
 
         return state_dict_
 
@@ -163,7 +163,7 @@ class IREncoderBertModel(MegatronModule):
             init_method=init_method,
             scaled_init_method=scaled_init_method)
 
-        self.ict_head = get_linear_layer(args.hidden_size, ict_head_size, init_method)
+        self.ict_head = get_linear_layer(args.hidden_size, ict_head_size, init_method, gather_params_on_init=args.zero_stage == 3)
         self._ict_head_key = 'ict_head'
 
     def forward(self, input_ids, attention_mask, tokentype_ids=None):
@@ -181,17 +181,17 @@ class IREncoderBertModel(MegatronModule):
         ict_logits = self.ict_head(pooled_output)
         return ict_logits, None
 
-    def state_dict_for_save_checkpoint(self, destination=None, prefix='',
-                                       keep_vars=False):
+    def state_dict_for_save_checkpoint(self, prefix='', keep_vars=False):
         """For easy load when model is combined with other heads,
         add an extra key."""
 
         state_dict_ = {}
         state_dict_[self._language_model_key] \
-            = self.language_model.state_dict_for_save_checkpoint(
-            destination, prefix, keep_vars)
+            = self.language_model.state_dict_for_save_checkpoint(prefix=prefix,
+                                                                 keep_vars=keep_vars)
         state_dict_[self._ict_head_key] \
-            = self.ict_head.state_dict(destination, prefix, keep_vars)
+            = self.ict_head.state_dict(prefix=prefix,
+                                       keep_vars=keep_vars)
         return state_dict_
 
     def load_state_dict(self, state_dict, strict=True):

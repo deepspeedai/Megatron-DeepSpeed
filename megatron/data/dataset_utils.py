@@ -28,12 +28,12 @@ import torch
 
 from megatron import (
     get_args,
-    mpu,
     print_rank_0
 )
+from megatron.core import mpu
 from megatron.data.blendable_dataset import BlendableDataset
 from megatron.data.indexed_dataset import make_dataset as make_indexed_dataset
-
+from deepspeed.accelerator import get_accelerator
 DSET_TYPE_BERT = 'standard_bert'
 DSET_TYPE_ICT = 'ict'
 DSET_TYPE_T5  = 't5'
@@ -63,12 +63,18 @@ def get_datasets_weights_and_num_samples(data_prefix,
     # Add 0.5% (the 1.005 factor) so in case the bleding dataset does
     # not uniformly distribute the number of samples, we still have
     # samples left to feed to the network.
-    datasets_train_valid_test_num_samples = []
-    for weight in weights:
-        datasets_train_valid_test_num_samples.append(
-            [int(math.ceil(val * weight * 1.005))
-             for val in train_valid_test_num_samples])
-
+    if isinstance(train_valid_test_num_samples, list):
+        datasets_train_valid_test_num_samples = []
+        for weight in weights:
+            datasets_train_valid_test_num_samples.append(
+                [int(math.ceil(val * weight * 1.005))
+                for val in train_valid_test_num_samples])
+    else:
+        # Used when separate dataset files are provided for train,
+        # valid and test
+        datasets_train_valid_test_num_samples = [
+            int(math.ceil(train_valid_test_num_samples * weight * 1.005))
+            for weight in weights]
 
     return prefixes, weights, datasets_train_valid_test_num_samples
 
@@ -224,7 +230,7 @@ def create_masked_lm_predictions(tokens,
 
     if masked_lm_prob == 0:
         return (output_tokens, masked_lm_positions,
-                masked_lm_labels, token_boundary)
+                masked_lm_labels, token_boundary, None)
 
     num_to_predict = min(max_predictions_per_seq,
                          max(1, int(round(len(tokens) * masked_lm_prob))))
@@ -436,6 +442,10 @@ def build_train_valid_test_datasets(data_prefix, data_impl, splits_string,
     output = get_datasets_weights_and_num_samples(data_prefix,
                                                   train_valid_test_num_samples)
     prefixes, weights, datasets_train_valid_test_num_samples = output
+    train_num_samples, valid_num_samples, test_num_samples = map(
+        sum,
+        zip(*datasets_train_valid_test_num_samples)
+    )
 
     # Build individual datasets.
     train_datasets = []
@@ -446,7 +456,8 @@ def build_train_valid_test_datasets(data_prefix, data_impl, splits_string,
             prefixes[i], data_impl, splits_string,
             datasets_train_valid_test_num_samples[i],
             max_seq_length, masked_lm_prob, short_seq_prob,
-            seed, skip_warmup, binary_head, dataset_type=dataset_type)
+            seed, skip_warmup, binary_head, max_seq_length_dec,
+            dataset_type=dataset_type)
         if train_ds:
             train_datasets.append(train_ds)
         if valid_ds:
@@ -454,16 +465,16 @@ def build_train_valid_test_datasets(data_prefix, data_impl, splits_string,
         if test_ds:
             test_datasets.append(test_ds)
 
-        # Blend.
+    # Blend.
     blending_train_dataset = None
     if train_datasets:
-        blending_train_dataset = BlendableDataset(train_datasets, weights)
+        blending_train_dataset = BlendableDataset(train_datasets, weights, train_num_samples)
     blending_valid_dataset = None
     if valid_datasets:
-        blending_valid_dataset = BlendableDataset(valid_datasets, weights)
+        blending_valid_dataset = BlendableDataset(valid_datasets, weights, valid_num_samples)
     blending_test_dataset = None
     if test_datasets:
-        blending_test_dataset = BlendableDataset(test_datasets, weights)
+        blending_test_dataset = BlendableDataset(test_datasets, weights, test_num_samples)
 
     return (blending_train_dataset, blending_valid_dataset,
             blending_test_dataset)
@@ -640,26 +651,38 @@ def get_samples_mapping(indexed_dataset,
                         name,
                         binary_head):
     """Get a list that maps a sample index to a starting sentence index, end sentence index, and length"""
-
-    if not num_epochs:
-        if not max_num_samples:
-            raise ValueError("Need to specify either max_num_samples "
-                             "or num_epochs")
-        num_epochs = np.iinfo(np.int32).max - 1
-    if not max_num_samples:
+    args = get_args()
+    if args.train_data_exact_num_epochs is not None and name == 'train':
+        num_epochs = args.train_data_exact_num_epochs
         max_num_samples = np.iinfo(np.int64).max - 1
+    else:
+        if not num_epochs:
+            if not max_num_samples:
+                raise ValueError("Need to specify either max_num_samples "
+                                "or num_epochs")
+            num_epochs = np.iinfo(np.int32).max - 1
+        if not max_num_samples:
+            max_num_samples = np.iinfo(np.int64).max - 1
 
     # Filename of the index mapping
     indexmap_filename = data_prefix
     indexmap_filename += '_{}_indexmap'.format(name)
-    if num_epochs != (np.iinfo(np.int32).max - 1):
-        indexmap_filename += '_{}ep'.format(num_epochs)
-    if max_num_samples != (np.iinfo(np.int64).max - 1):
-        indexmap_filename += '_{}mns'.format(max_num_samples)
+    if args.train_data_exact_num_epochs is not None and name == 'train':
+        indexmap_filename += '_exact{}ep'.format(num_epochs)
+    else:
+        if num_epochs != (np.iinfo(np.int32).max - 1):
+            indexmap_filename += '_{}ep'.format(num_epochs)
+        if max_num_samples != (np.iinfo(np.int64).max - 1):
+            indexmap_filename += '_{}mns'.format(max_num_samples)
     indexmap_filename += '_{}msl'.format(max_seq_length)
     indexmap_filename += '_{:0.2f}ssp'.format(short_seq_prob)
     indexmap_filename += '_{}s'.format(seed)
     indexmap_filename += '.npy'
+
+    if name == 'train':
+        # force to use certain index files
+        if args.train_idx_path is not None:
+            indexmap_filename = args.train_idx_path
 
     # Build the indexed mapping if not exist.
     if torch.distributed.get_rank() == 0 and \
@@ -674,7 +697,7 @@ def get_samples_mapping(indexed_dataset,
         # Build samples mapping
         verbose = torch.distributed.get_rank() == 0
         start_time = time.time()
-        print_rank_0(' > building sapmles index mapping for {} ...'.format(
+        print_rank_0(' > building samples index mapping for {} ...'.format(
             name))
         # First compile and then import.
         from megatron.data import helpers
@@ -688,7 +711,7 @@ def get_samples_mapping(indexed_dataset,
             seed,
             verbose,
             2 if binary_head else 1)
-        print_rank_0(' > done building sapmles index maping')
+        print_rank_0(' > done building samples index maping')
         np.save(indexmap_filename, samples_mapping, allow_pickle=True)
         print_rank_0(' > saved the index mapping in {}'.format(
             indexmap_filename))
@@ -699,12 +722,13 @@ def get_samples_mapping(indexed_dataset,
     # This should be a barrier but nccl barrier assumes
     # device_index=rank which is not the case for model
     # parallel case
-    counts = torch.cuda.LongTensor([1])
-    torch.distributed.all_reduce(counts, group=mpu.get_data_parallel_group())
-    torch.distributed.all_reduce(counts, group=mpu.get_pipeline_model_parallel_group())
-    assert counts[0].item() == (
-        torch.distributed.get_world_size() //
-        torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group()))
+    if get_accelerator().device_count() > 0: # Skip when CPU-only
+        counts = get_accelerator().LongTensor([1])
+        torch.distributed.all_reduce(counts, group=mpu.get_data_parallel_group())
+        torch.distributed.all_reduce(counts, group=mpu.get_pipeline_model_parallel_group())
+        assert counts[0].item() == (
+            torch.distributed.get_world_size() //
+            torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group()))
 
     # Load indexed dataset.
     print_rank_0(' > loading indexed mapping from {}'.format(

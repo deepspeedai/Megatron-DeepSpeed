@@ -1,17 +1,4 @@
-# coding=utf-8
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 from commons import set_random_seed
 from commons import IdentityLayer
@@ -23,6 +10,7 @@ import torch.nn.functional as F
 import torch
 import random
 import sys
+from deepspeed.accelerator import get_accelerator
 sys.path.append("../..")
 
 
@@ -30,9 +18,9 @@ def torch_cross_entropy(batch_size, seq_length, vocab_size,
                         logits_scale, seed):
     set_random_seed(seed)
     identity = IdentityLayer((batch_size, seq_length, vocab_size),
-                             scale=logits_scale).cuda()
+                             scale=logits_scale).to(get_accelerator().device_name())
     logits = identity()
-    target = torch.cuda.LongTensor(
+    target = get_accelerator().LongTensor(
         size=(batch_size, seq_length)).random_(0, vocab_size)
     loss = F.cross_entropy(logits.view(-1, logits.size()[-1]),
                            target.view(-1),
@@ -45,10 +33,10 @@ def mpu_cross_entropy(batch_size, seq_length, vocab_size,
                       logits_scale, seed):
     set_random_seed(seed)
     identity = IdentityLayer((batch_size, seq_length, vocab_size),
-                             scale=logits_scale).cuda()
+                             scale=logits_scale).to(get_accelerator().device_name())
     logits = identity()
     logits_parallel = mpu.scatter_to_tensor_model_parallel_region(logits)
-    target = torch.cuda.LongTensor(
+    target = get_accelerator().LongTensor(
         size=(batch_size, seq_length)).random_(0, vocab_size)
     loss = vocab_parallel_cross_entropy(logits_parallel, target).mean()
     loss.backward()

@@ -1,27 +1,14 @@
-# coding=utf-8
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright (C) 2024 Habana Labs, Ltd. an Intel Company.
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 """Megatron tokenizers."""
 
 from abc import ABC
 from abc import abstractmethod
 
+from transformers import AutoTokenizer
 from .bert_tokenization import FullTokenizer as FullBertTokenizer
 from .gpt2_tokenization import GPT2Tokenizer
-
-
 def build_tokenizer(args):
     """Initialize tokenizer."""
     if args.rank == 0:
@@ -29,22 +16,38 @@ def build_tokenizer(args):
               flush=True)
 
     # Select and instantiate the tokenizer.
-    assert args.vocab_file is not None
     if args.tokenizer_type == 'BertWordPieceLowerCase':
+        assert args.vocab_file is not None
         tokenizer = _BertWordPieceTokenizer(vocab_file=args.vocab_file,
                                             lower_case=True,
                                             vocab_extra_ids=args.vocab_extra_ids)
     elif args.tokenizer_type == 'BertWordPieceCase':
+        assert args.vocab_file is not None
         tokenizer = _BertWordPieceTokenizer(vocab_file=args.vocab_file,
                                             lower_case=False,
                                             vocab_extra_ids=args.vocab_extra_ids)
     elif args.tokenizer_type == 'GPT2BPETokenizer':
+        assert args.vocab_file is not None
         assert args.merge_file is not None
         tokenizer = _GPT2BPETokenizer(args.vocab_file, args.merge_file)
+    elif args.tokenizer_type == 'SentencePieceTokenizer':
+        assert args.tokenizer_model is not None
+        tokenizer = _SentencePieceTokenizer(args.tokenizer_model, vocab_extra_ids=args.vocab_extra_ids)
+    elif args.tokenizer_type == 'GPTSentencePieceTokenizer':
+        assert args.tokenizer_model is not None
+        tokenizer = _GPTSentencePieceTokenizer(args.tokenizer_model)
+    elif args.tokenizer_type == 'NullTokenizer':
+        assert args.vocab_size is not None
+        tokenizer = _NullTokenizer(args.vocab_size)
+    elif args.tokenizer_type == 'HFTokenizer':
+        assert args.tokenizer_model is not None
+        tokenizer = _HFTokenizer(args.tokenizer_model,
+                                 args.seq_length,
+                                 args.trust_remote_code)
     else:
         raise NotImplementedError('{} tokenizer is not '
                                   'implemented.'.format(args.tokenizer_type))
-
+    
     # Add vocab size.
     args.padded_vocab_size = _vocab_size_with_padding(tokenizer.vocab_size,
                                                       args)
@@ -289,3 +292,353 @@ class _GPT2BPETokenizer(AbstractTokenizer):
     @property
     def eod(self):
         return self.eod_id
+
+
+class _SentencePieceTokenizer(AbstractTokenizer):
+    """SentencePieceTokenizer-Megatron wrapper"""
+
+    def __init__(self, model_file, vocab_extra_ids=0):
+        name = 'SentencePieceTokenizer'
+        super().__init__(name)
+
+        import sentencepiece
+        self.tokenizer = sentencepiece.SentencePieceProcessor(model_file=model_file)
+        self._initalize(vocab_extra_ids)
+
+    def _populate_vocab(self):
+        self._vocab = {}
+        self._inv_vocab = {}
+
+        for i in range(len(self.tokenizer)):
+            t = self.tokenizer.id_to_piece(i)
+            self._inv_vocab[i] = t
+            self._vocab[t] = i
+
+    def _initalize(self, vocab_extra_ids):
+        self._populate_vocab()
+        self._special_tokens = {}
+        self._inv_special_tokens = {}
+
+        self._t5_tokens = []
+
+        def _add_special_token(t):
+            if t not in self._vocab:
+                next_id = len(self._vocab)
+                self._vocab[t] = next_id
+                self._inv_vocab[next_id] = t
+            self._special_tokens[t] = self._vocab[t]
+            self._inv_special_tokens[self._vocab[t]] = t
+
+        _add_special_token('<CLS>')
+        self._cls_id = self._vocab['<CLS>']
+        _add_special_token('<SEP>')
+        self._sep_id = self._vocab['<SEP>']
+        _add_special_token('<EOD>')
+        self._eod_id = self._vocab['<EOD>']
+        _add_special_token('<MASK>')
+        self._mask_id = self._vocab['<MASK>']
+
+        pad_id = self.tokenizer.pad_id()
+        try:
+            pad_token = self.tokenizer.id_to_piece(pad_id)
+        except IndexError:
+            pad_token = '<PAD>'
+        _add_special_token(pad_token)
+        self._pad_id = self._vocab[pad_token]
+
+        bos_id = self.tokenizer.bos_id()
+        try:
+            bos_token = self.tokenizer.id_to_piece(bos_id)
+        except IndexError:
+            bos_token = '<BOS>'
+        _add_special_token(bos_token)
+        self._bos_id = self._vocab[bos_token]
+
+        eos_id = self.tokenizer.eos_id()
+        try:
+            eos_token = self.tokenizer.id_to_piece(eos_id)
+        except IndexError:
+            eos_token = '<EOS>'
+        _add_special_token(eos_token)
+        self._eos_id = self._vocab[eos_token]
+
+        for i in range(vocab_extra_ids):
+            t = "<extra_id_{}>".format(i)
+            _add_special_token(t)
+            self._t5_tokens += [t]
+
+    @property
+    def vocab_size(self):
+        return len(self._vocab)
+
+    @property
+    def vocab(self):
+        return self._vocab
+
+    @property
+    def inv_vocab(self):
+        return self._inv_vocab
+
+    @property
+    def decoder(self):
+        return self._inv_vocab
+
+    @property
+    def encoder(self):
+        return self._vocab
+
+    # From:
+    # https://github.com/NVIDIA/NeMo/blob/c8fa217e811d60d11d014827c7f3845ff6c99ae7/nemo/collections/common/tokenizers/sentencepiece_tokenizer.py#L89
+    def tokenize(self, text):
+        ids = []
+        idx = 0
+
+        while 1:
+            indices = {}
+            for token in self._special_tokens:
+                try:
+                    indices[token] = text[idx:].index(token)
+                except ValueError:
+                    continue
+            if len(indices) == 0:
+                break
+
+            next_token = min(indices, key=indices.get)
+            next_idx = idx + indices[next_token]
+
+            ids.extend(self.tokenizer.encode_as_ids(text[idx:next_idx]))
+            ids.append(self._special_tokens[next_token])
+            idx = next_idx + len(next_token)
+
+        ids.extend(self.tokenizer.encode_as_ids(text[idx:]))
+        return ids
+
+    # From:
+    # https://github.com/NVIDIA/NeMo/blob/c8fa217e811d60d11d014827c7f3845ff6c99ae7/nemo/collections/common/tokenizers/sentencepiece_tokenizer.py#L125
+    def detokenize(self, ids):
+        text = ""
+        last_i = 0
+
+        for i, id in enumerate(ids):
+            if id in self._inv_special_tokens:
+                text += self.tokenizer.decode_ids(ids[last_i:i]) + " "
+                text += self._inv_special_tokens[id] + " "
+                last_i = i + 1
+
+        text += self.tokenizer.decode_ids(ids[last_i:])
+        return text
+
+    @property
+    def cls(self):
+        return self._cls_id
+
+    @property
+    def sep(self):
+        return self._sep_id
+
+    @property
+    def pad(self):
+        return self._pad_id
+
+    @property
+    def bos_token_id(self):
+        return self._bos_id
+
+    @property
+    def bos(self):
+        return self._bos_id
+
+    @property
+    def eod(self):
+        return self._eod_id
+
+    @property
+    def eos_token_id(self):
+        return self._eos_id
+
+    @property
+    def eos(self):
+        return self._eos_id
+
+    @property
+    def mask(self):
+        return self._mask_id
+
+    @property
+    def additional_special_tokens_ids(self):
+        return [self.vocab[k] for k in self._t5_tokens]
+
+class _GPTSentencePieceTokenizer(_SentencePieceTokenizer):
+    """SentencePieceTokenizer-Megatron wrapper"""
+
+    def __init__(self, model_file,):
+        super().__init__(model_file, vocab_extra_ids=0)
+
+    def _initalize(self, vocab_extra_ids):
+        self._populate_vocab()
+
+        self._pad_id = self.tokenizer.pad_id()
+        self._bos_id = self.tokenizer.bos_id()
+        self._eos_id = self.tokenizer.eos_id()
+
+    def tokenize(self, text):
+        return self.tokenizer.encode_as_ids(text)
+
+    def detokenize(self, ids):
+        return self.tokenizer.decode_ids(ids)
+
+    @property
+    def cls(self):
+        return -1
+
+    @property
+    def sep(self):
+        return -1
+
+    @property
+    def mask(self):
+        return -1
+
+    @property
+    def eod(self):
+        return self._eos_id
+
+    @property
+    def additional_special_tokens_ids(self):
+        return None
+
+class _NullTokenizer:
+    def __init__(self, vocab_size):
+        vocab_size = int(vocab_size)
+        self._eos_id = vocab_size
+        self.vocab_size = vocab_size+1
+
+    def tokenize(self, text):
+        return [int(x) for x in text.split(' ')]
+
+    def detokenize(self, ids):
+        text = [str(x) for x in ids]
+        return ' '.join(text)
+
+    @property
+    def cls(self):
+        return -1
+
+    @property
+    def sep(self):
+        return -1
+
+    @property
+    def mask(self):
+        return -1
+
+    @property
+    def eod(self):
+        return self._eos_id
+
+    @property
+    def additional_special_tokens_ids(self):
+        return None
+
+
+class _HFTokenizer(AbstractTokenizer):
+    """HF Tokenizer"""
+    def __init__(self, tokenizer_name_or_path, max_seq_len, trust_remote_code):
+        name = tokenizer_name_or_path
+        super().__init__(name)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path,
+                                                       padding_side="right",
+                                                       trust_remote_code=trust_remote_code,
+                                                       use_fast=False)
+        
+        DEFAULT_PAD_TOKEN = "[PAD]"
+        DEFAULT_EOS_TOKEN = "</s>"
+        DEFAULT_BOS_TOKEN = "<s>"
+        DEFAULT_UNK_TOKEN = "<unk>"
+        special_tokens_dict = dict()
+        if self.tokenizer.pad_token is None:
+            special_tokens_dict["pad_token"] = DEFAULT_PAD_TOKEN
+        if self.tokenizer.eos_token is None:
+            special_tokens_dict["eos_token"] = DEFAULT_EOS_TOKEN
+        if self.tokenizer.bos_token is None:
+            special_tokens_dict["bos_token"] = DEFAULT_BOS_TOKEN
+        if self.tokenizer.unk_token is None:
+            special_tokens_dict["unk_token"] = DEFAULT_UNK_TOKEN
+        self.tokenizer.add_special_tokens(special_tokens_dict)
+        # if self.tokenizer.pad_token == None:
+        #     self.tokenizer.pad_token= "[PAD]"
+        self.tokenizer.model_max_length = max_seq_len
+        self.encoder = self.tokenizer.get_vocab()
+        self.decoder = {v: k for k, v in self.encoder.items()}
+
+    @property
+    def vocab_size(self):
+        return self.tokenizer.vocab_size
+
+    @property
+    def vocab(self):
+        return self.encoder
+
+    @property
+    def inv_vocab(self):
+        return self.decoder
+
+    def tokenize(self, text):
+        return self.tokenizer.encode(text)
+
+    def detokenize(self, token_ids):
+        return self.tokenizer.decode(token_ids)
+
+    @property
+    def bos(self):
+        return self.bos_token_id
+
+    @property
+    def bos_token_id(self):
+        candidate = self.tokenizer.eos_token_id
+        return self._check_token_candidate(candidate)
+
+    @property
+    def cls(self):
+        candidate = self.tokenizer.cls_token_id
+        return self._check_token_candidate(candidate)
+
+    @property
+    def sep(self):
+        candidate = self.tokenizer.sep_token_id
+        return self._check_token_candidate(candidate)
+
+    @property
+    def pad(self):
+        candidate = self.tokenizer.pad_token_id
+        return self._check_token_candidate(candidate)
+
+    @property
+    def eod(self):
+        candidate = self.tokenizer.eos_token_id
+        return self._check_token_candidate(candidate)
+
+    @property
+    def eos(self):
+        return self.eos_token_id
+
+    @property
+    def eos_token_id(self):
+        candidate = self.tokenizer.eos_token_id
+        return self._check_token_candidate(candidate)
+
+    @property
+    def mask(self):
+        candidate = self.tokenizer.mask_token_id
+        return self._check_token_candidate(candidate)
+
+    @property
+    def additional_special_tokens_ids(self):
+        return self.tokenizer.additional_special_tokens_ids
+
+    @staticmethod
+    def _check_token_candidate(candidate):
+        """Checks whether the candidate is None or not, and raises an exception if it is."""
+        if candidate is None:
+            raise AttributeError("Requested token doesn't exist in current tokenizer")
+        return candidate

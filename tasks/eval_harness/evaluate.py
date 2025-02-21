@@ -23,9 +23,10 @@ import torch
 from megatron import get_args
 from megatron import print_rank_0
 from megatron import get_tokenizer
-from megatron import mpu
+from megatron.core.enums import ModelType
+from megatron.core import mpu
 from megatron.training import setup_model_and_optimizer, get_model
-from megatron.mpu.mappings import gather_from_tensor_model_parallel_region
+from megatron.core.tensor_parallel.mappings import gather_from_tensor_model_parallel_region
 
 from megatron.utils import get_ltor_masks_and_position_ids, unwrap_model
 from megatron.p2p_communication import recv_forward, send_forward
@@ -36,6 +37,7 @@ from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 from megatron.model.distributed import DistributedDataParallel as LocalDDP
 from megatron.model.module import Float16Module
 from deepspeed.runtime.pipe import schedule
+from deepspeed.accelerator import get_accelerator
 
 class EvalHarnessAdaptor(GPT2LM):
     def __init__(self, model, tokenizer):
@@ -55,12 +57,12 @@ class EvalHarnessAdaptor(GPT2LM):
         self.cache_hook = CacheHook(None)
         self.is_main = args.rank == 0
         self.is_local_main = args.local_rank == 0
-        self._device = torch.cuda.current_device()
+        self._device = get_accelerator().current_device_name()
         self.is_model_parallel = mpu.get_tensor_model_parallel_world_size() > 1
         self.is_pipe_parallel = mpu.get_pipeline_model_parallel_world_size() > 1
         self.is_data_parallel = mpu.get_data_parallel_world_size() > 1
         self.adaptive_seq_len = args.adaptive_seq_len
-        if self.is_data_parallel and args.moe_expert_parallel_size == 1: # For MoE model, allow a "fake data parallel" in order to partition model into multiple gpus 
+        if self.is_data_parallel and args.moe_expert_parallel_size == 1: # For MoE model, allow a "fake data parallel" in order to partition model into multiple gpus
             raise NotImplementedError("Data parallelism is currently not supported for evaluation")
 
         self.is_last_stage = True if not self.is_pipe_parallel else mpu.is_pipeline_last_stage()  # only the last stage of the pipeline model will receive the logits
@@ -221,8 +223,7 @@ class EvalHarnessAdaptor(GPT2LM):
                     a_output, *other_losses = self.model(tokens,
                         position_ids,
                         attention_mask,
-                        tokentype_ids=None,
-                        forward_method_parallel_output=False)
+                        tokentype_ids=None)
                     output.append(a_output)
 
                 if output is not None:
@@ -319,7 +320,7 @@ def load_ds_checkpoint_and_setup_megatron(extra_args_provider):
     # avoid printing the arguments, since they will later be overridden.
     _print_args = megatron.arguments._print_args
     megatron.arguments._print_args = lambda *_args, **kwarg: None
-    args = _parse_args(extra_args_provider)
+    args = parse_args(extra_args_provider=extra_args_provider)
 
     ds_checkpoint = DeepSpeedCheckpoint(args.load,
                                         tp_degree=args.tensor_model_parallel_size,
@@ -330,7 +331,7 @@ def load_ds_checkpoint_and_setup_megatron(extra_args_provider):
     cp_args = ds_checkpoint.get_args()
     # Merge the current args with the checkpoint args.
     skip_keys = ['world_size', 'rank', 'local_rank','device_count', 'micro_batch_size','global_batch_size', 'batch_size', 'tensorboard_dir', 'deepspeed', 'deepspeed_config',
-                     'data_parallel_size', 'pipeline_model_parallel_size', 'tensor_model_parallel_size', 'moe_expert_parallel_size', 'moe_token_dropping', 'load', 'rampup_batch_size', 'iteration', 'inference']
+                     'data_parallel_size', 'pipeline_model_parallel_size', 'tensor_model_parallel_size', 'moe_expert_parallel_size', 'moe_token_dropping', 'load', 'rampup_batch_size', 'iteration', 'inference', 'random_ltd']
 
     skip_if_specified = ['merge_file', 'vocab_file']
 
@@ -339,20 +340,24 @@ def load_ds_checkpoint_and_setup_megatron(extra_args_provider):
         cp_args.bf16 = False
         cp_args.params_dtype = torch.float32
 
+    cp_args.tokenizer_type = 'GPT2BPETokenizer'
+
     override_args(args, cp_args, skip_keys, skip_if_specified)
 
     # stop megatron from reparsing the arguments.
-    megatron.global_vars._parse_args = lambda *_args, **kwarg: args
+    megatron.arguments.parse_args = lambda *_args, **kwarg: args
+    megatron.global_vars._ensure_var_is_not_initialized = lambda *_args, **kwarg: None
     megatron.global_vars._GLOBAL_ARGS = args
 
-    initialize_megatron()
+    initialize_megatron(extra_args_provider=extra_args_provider)
+    megatron.global_vars._GLOBAL_ARGS = args
     torch.distributed.barrier()
 
     # Initializing megatron will update eg. tokenizer size. Override again.
     override_args(args, cp_args, skip_keys, skip_if_specified)
 
     # print final arguments.
-    _print_args(args)
+    _print_args("eval_harness arguments", args)
     if args.deepspeed:
 
         # Hack #3:
@@ -368,7 +373,7 @@ def load_ds_checkpoint_and_setup_megatron(extra_args_provider):
 
         cp_path = args.load
         args.load = None
-        model, _, _ = setup_model_and_optimizer(model_provider)
+        model, _, _ = setup_model_and_optimizer(model_provider, ModelType.encoder_or_decoder)
         model = model[0]
         zero_enabled = model._config.zero_enabled
         model._config.zero_enabled = False
@@ -394,10 +399,11 @@ def tasks_args(parser):
     group.add_argument('--results_path', type=str, default = "./results.json", help='Path to where the results will be stored.')
     group.add_argument('--adaptive_seq_len',  default = False, action='store_true',
                        help='Should the sequence length be adapted to the batch during evaluation, if in fp16 the results will be slightly different due to numerical errors but greatly speed up evaluation.')
+    group.add_argument('--num_fewshot', type=int, default = 0, help='Number of few-shot prompts.')
     group.add_argument('--eval_fp32',  default = False, action='store_true', help='Should the evaluation run in fp32')
     return parser
 
-from megatron.global_vars import _parse_args
+from megatron.arguments import parse_args
 
 def main():
     start = time.time()
@@ -408,7 +414,7 @@ def main():
         # adaptive_seq_len hack #1:
         # CL automatically enables reset_activation_shape() which allows us to change input shapes
         # and it also reshapes the attenion scores in attention_mask_func
-        args.curriculum_learning = 1
+        args.curriculum_learning_legacy = 1
 
     task_list = ALL_TASKS if args.task_list == 'all' else args.task_list.split(',')
     task_dict = tasks.get_task_dict(task_list)
@@ -419,7 +425,7 @@ def main():
 
     tokenizer = get_tokenizer()
     adaptor = EvalHarnessAdaptor(model, tokenizer)
-    results = evaluator.evaluate(adaptor, task_dict, False, 0, None)
+    results = evaluator.evaluate(adaptor, task_dict, False, args.num_fewshot, None)
 
     if mpu.is_pipeline_last_stage() and mpu.get_tensor_model_parallel_rank() == 0:
         print(json.dumps(results, indent=2))

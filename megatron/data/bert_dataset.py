@@ -1,17 +1,4 @@
-# coding=utf-8
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 """BERT Style dataset."""
 
@@ -31,7 +18,6 @@ from megatron.data.dataset_utils import (
     create_tokens_and_tokentypes,
     create_masked_lm_predictions
 )
-
 
 class BertDataset(torch.utils.data.Dataset):
 
@@ -73,13 +59,14 @@ class BertDataset(torch.utils.data.Dataset):
         return self.samples_mapping.shape[0]
 
     def __getitem__(self, idx):
+        args = get_args()
         start_idx, end_idx, seq_length = self.samples_mapping[idx]
         sample = [self.indexed_dataset[i] for i in range(start_idx, end_idx)]
         # Note that this rng state should be numpy and not python since
         # python randint is inclusive whereas the numpy one is exclusive.
         # We % 2**32 since numpy requres the seed to be between 0 and 2**32 - 1
         np_rng = np.random.RandomState(seed=((self.seed + idx) % 2**32))
-        return build_training_sample(sample, seq_length,
+        train_sample = build_training_sample(sample, seq_length,
                                      self.max_seq_length,  # needed for padding
                                      self.vocab_id_list,
                                      self.vocab_id_to_token_dict,
@@ -87,6 +74,9 @@ class BertDataset(torch.utils.data.Dataset):
                                      self.mask_id, self.pad_id,
                                      self.masked_lm_prob, np_rng,
                                      self.binary_head)
+        if args.return_data_index:
+            train_sample['index'] = np.array([idx], dtype=np.int64)
+        return train_sample
 
 
 
@@ -169,7 +159,9 @@ def pad_and_convert_to_numpy(tokens, tokentypes, masked_positions,
     # Some checks.
     num_tokens = len(tokens)
     padding_length = max_seq_length - num_tokens
-    assert padding_length >= 0
+    assert padding_length >= 0, \
+        f"num_tokens ({num_tokens}) is greater than " \
+        "max_seq_length ({max_seq_length})."
     assert len(tokentypes) == num_tokens
     assert len(masked_positions) == len(masked_labels)
 

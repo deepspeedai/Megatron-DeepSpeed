@@ -1,17 +1,4 @@
-# coding=utf-8
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 """Utilities for models."""
 
@@ -20,6 +7,8 @@ import math
 import torch
 
 from megatron import get_args
+
+from deepspeed.runtime.zero import GatheredParameters
 
 def init_method_normal(sigma):
     """Init method based on N(0, sigma)."""
@@ -39,9 +28,14 @@ def scaled_init_method_normal(sigma, num_layers):
     return init_
 
 
+def gather_and_init(param, init_method):
+    with GatheredParameters(param, modifier_rank=0):
+        init_method(param)
+        
+
 def attention_mask_func(attention_scores, attention_mask):
     args = get_args()
-    if args.curriculum_learning:
+    if args.curriculum_learning_legacy or args.data_efficiency_curriculum_learning:
         attention_mask_ = attention_mask
         actual_seqlen = attention_scores.size()[2]
         if actual_seqlen != attention_mask_.size()[2]:
@@ -53,12 +47,15 @@ def attention_mask_func(attention_scores, attention_mask):
     return attention_scores
 
 
-def get_linear_layer(rows, columns, init_method):
+def get_linear_layer(rows, columns, init_method, gather_params_on_init=False):
     """Simple linear layer with weight initialization."""
     layer = torch.nn.Linear(rows, columns)
-    init_method(layer.weight)
+    if get_args().perform_initialization:
+        with GatheredParameters(layer.weight, modifier_rank=0, enabled=gather_params_on_init):
+            init_method(layer.weight)
     with torch.no_grad():
-        layer.bias.zero_()
+        with GatheredParameters(layer.bias, modifier_rank=0, enabled=gather_params_on_init):
+            layer.bias.zero_()
     return layer
 
 @torch.jit.script

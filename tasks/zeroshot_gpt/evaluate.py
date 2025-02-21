@@ -1,17 +1,4 @@
-# coding=utf-8
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 """GPT zero-shot evaluation."""
 
@@ -22,14 +9,15 @@ import torch
 from megatron import get_args
 from megatron import print_rank_0, is_last_rank
 from megatron import get_tokenizer
-from megatron import mpu
+from megatron.core import parallel_state, tensor_parallel
 from megatron.checkpointing import load_checkpoint
 from megatron.model import GPTModel
 from megatron.training import get_model
+from megatron.arguments import core_transformer_config_from_args
 from megatron.utils import get_ltor_masks_and_position_ids, unwrap_model
 from megatron.p2p_communication import recv_forward, send_forward
 from tasks.finetune_utils import build_data_loader
-
+from deepspeed.accelerator import get_accelerator
 from .datasets import build_dataset
 
 # These are needed to unwrap the model, would be nice to put these in megatron.utils if possible?
@@ -44,6 +32,8 @@ def get_model_provider(eval_metric):
     def model_provider(pre_process=True, post_process=True):
         """Build the model."""
 
+        config = core_transformer_config_from_args(get_args())
+
         if eval_metric == 'loss':
             parallel_output = True
         elif eval_metric == 'accuracy':
@@ -53,7 +43,7 @@ def get_model_provider(eval_metric):
                                       'is not supported.'.format(eval_metric))
 
         print_rank_0('building GPT model ...')
-        model = GPTModel(num_tokentypes=0, parallel_output=parallel_output,
+        model = GPTModel(config=config, num_tokentypes=0, parallel_output=parallel_output,
                          pre_process=pre_process, post_process=post_process)
 
         return model
@@ -66,8 +56,8 @@ def process_batch(batch):
     args = get_args()
     tokenizer = get_tokenizer()
 
-    loss_mask = batch['pad_mask'].long().cuda().contiguous().byte()
-    tokens_ = batch['text'].long().cuda().contiguous()
+    loss_mask = batch['pad_mask'].long().to(get_accelerator().device_name()).contiguous().byte()
+    tokens_ = batch['text'].long().to(get_accelerator().device_name()).contiguous()
     labels = tokens_[:, 1:].contiguous()
     tokens = tokens_[:, :-1].contiguous()
 
@@ -103,10 +93,10 @@ def forward_step(batch, model, eval_metric):
 
     send_forward(output)
 
-    if mpu.is_pipeline_last_stage():
+    if parallel_state.is_pipeline_last_stage():
         # For loss, return the unreduced loss.
         if eval_metric == 'loss':
-            losses = mpu.vocab_parallel_cross_entropy(
+            losses = tensor_parallel.vocab_parallel_cross_entropy(
                 output.contiguous().float(), labels.contiguous())
             loss = torch.sum(
                 losses.view(-1) * loss_mask.contiguous().view(-1).float())
@@ -142,9 +132,9 @@ def evaluate(data_loader, model, eval_metric):
             output = forward_step(batch, model, eval_metric)
 
             # Reduce across processes.
-            if mpu.is_pipeline_last_stage():
+            if parallel_state.is_pipeline_last_stage():
                 torch.distributed.all_reduce(output,
-                                             group=mpu.get_data_parallel_group())
+                                             group=parallel_state.get_data_parallel_group())
 
                 total_output += output
 
@@ -205,7 +195,7 @@ def main():
             args.task))
 
     # Set up model and load checkpoint.
-    model = get_model(get_model_provider(eval_metric))
+    model = get_model(get_model_provider(eval_metric), wrap_with_ddp=False)
     if args.load is not None:
         _ = load_checkpoint(model, None, None)
 

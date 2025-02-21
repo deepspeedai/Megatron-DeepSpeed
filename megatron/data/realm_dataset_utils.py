@@ -4,9 +4,11 @@ import time
 import numpy as np
 import torch
 
-from megatron import mpu, print_rank_0
+from megatron import print_rank_0
+from megatron.core import mpu, tensor_parallel
 from megatron.data.dataset_utils import create_masked_lm_predictions, pad_and_convert_to_numpy
-from megatron import get_args, get_tokenizer, print_rank_0, mpu
+from megatron import get_args, get_tokenizer, print_rank_0
+from deepspeed.accelerator import get_accelerator
 
 
 def get_one_epoch_dataloader(dataset, micro_batch_size=None):
@@ -47,7 +49,7 @@ def get_ict_batch(data_iterator):
         data = None
     else:
         data = next(data_iterator)
-    data_b = mpu.broadcast_data(keys, data, datatype)
+    data_b = tensor_parallel.broadcast_data(keys, data, datatype)
 
     # Unpack.
     query_tokens = data_b['query_tokens'].long()
@@ -177,7 +179,7 @@ def get_block_samples_mapping(block_dataset, title_dataset, data_prefix, num_epo
     # This should be a barrier but nccl barrier assumes
     # device_index=rank which is not the case for model
     # parallel case
-    counts = torch.cuda.LongTensor([1])
+    counts = get_accelerator().LongTensor([1])
     torch.distributed.all_reduce(counts, group=mpu.get_data_parallel_group())
     assert counts[0].item() == torch.distributed.get_world_size(
         group=mpu.get_data_parallel_group())

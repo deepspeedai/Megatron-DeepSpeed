@@ -22,10 +22,9 @@ import time
 
 import torch
 import torch.nn.functional as F
-
 from megatron import get_args
 from megatron import get_tokenizer
-from megatron import mpu
+from megatron.core import mpu
 from megatron.utils import get_ltor_masks_and_position_ids, unwrap_model
 from megatron.p2p_communication import recv_forward, send_forward
 
@@ -33,14 +32,14 @@ from megatron.p2p_communication import recv_forward, send_forward
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 from megatron.model import DistributedDataParallel as LocalDDP
 from megatron.model import Float16Module
-
+from deepspeed.accelerator import get_accelerator
 def get_batch(context_tokens):
     """Generate batch from context tokens."""
     args = get_args()
     tokenizer = get_tokenizer()
 
     # Move to GPU.
-    tokens = context_tokens.view(args.micro_batch_size, -1).contiguous().cuda()
+    tokens = context_tokens.view(args.micro_batch_size, -1).contiguous().to(get_accelerator().device_name())
     # Get the attention mask and postition ids.
     attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
         tokens,
@@ -137,7 +136,7 @@ def generate_samples_input_from_file(model):
                 context_length = 0
 
             input_info = [terminate_runs, raw_text_len, context_length]
-            input_info_tensor = torch.cuda.LongTensor(input_info)
+            input_info_tensor = get_accelerator().LongTensor(input_info)
             torch.distributed.all_reduce(input_info_tensor,
                                          group=mpu.get_model_parallel_group())
             terminate_runs = input_info_tensor[0].item()
@@ -154,14 +153,14 @@ def generate_samples_input_from_file(model):
                 if mpu.is_pipeline_first_stage():
                     src = mpu.get_pipeline_model_parallel_first_rank()
                     group = mpu.get_pipeline_model_parallel_group()
-                    context_tokens_tensor = torch.cuda.LongTensor(context_tokens)
+                    context_tokens_tensor = get_accelerator().LongTensor(context_tokens)
                     torch.distributed.broadcast(context_tokens_tensor, src, group)
                 else:
                     src = mpu.get_pipeline_model_parallel_first_rank()
                     group = mpu.get_pipeline_model_parallel_group()
                     context_tokens_tensor = torch.empty(context_length,
                                                         dtype=torch.int64,
-                                                        device=torch.device("cuda"))
+                                                        device=get_accelerator().current_device_name())
                     torch.distributed.broadcast(context_tokens_tensor, src, group)
                     context_tokens = context_tokens_tensor.cpu().numpy().tolist()
 
@@ -191,7 +190,7 @@ def generate_samples_input_from_file(model):
             context_count += 1
 
 # We added this function to support the tasks evaluation such as squad
-# and drop in the https://github.com/EleutherAI/lm-evaluation-harness 
+# and drop in the https://github.com/EleutherAI/lm-evaluation-harness
 # codebase. The lm-evaluation-harness code can now call this function
 # similar to their current generate function call used for gpt style models.
 def generate_samples_eval(model, context, max_gen_length, eos_token_id):
@@ -218,7 +217,7 @@ def generate_samples_eval(model, context, max_gen_length, eos_token_id):
     decode_tokens = decode_tokens[0].cpu().numpy().tolist()
     trim_decode_tokens = tokenizer.detokenize(
         decode_tokens)[raw_text_len:]
- 
+
     return trim_decode_tokens
 
 
@@ -259,7 +258,7 @@ def generate_samples_interactive(model, print_frequency=24):
                 context_length = 0
 
             input_info = [terminate_runs, raw_text_len, context_length]
-            input_info_tensor = torch.cuda.LongTensor(input_info)
+            input_info_tensor = get_accelerator().LongTensor(input_info)
             torch.distributed.all_reduce(input_info_tensor,
                                          group=mpu.get_model_parallel_group())
             terminate_runs = input_info_tensor[0].item()
@@ -276,14 +275,14 @@ def generate_samples_interactive(model, print_frequency=24):
                 if mpu.is_pipeline_first_stage():
                     src = mpu.get_pipeline_model_parallel_first_rank()
                     group = mpu.get_pipeline_model_parallel_group()
-                    context_tokens_tensor = torch.cuda.LongTensor(context_tokens)
+                    context_tokens_tensor = get_accelerator().LongTensor(context_tokens)
                     torch.distributed.broadcast(context_tokens_tensor, src, group)
                 else:
                     src = mpu.get_pipeline_model_parallel_first_rank()
                     group = mpu.get_pipeline_model_parallel_group()
                     context_tokens_tensor = torch.empty(context_length,
                                                         dtype=torch.int64,
-                                                        device=torch.device("cuda"))
+                                                        device=torch.device(get_accelerator().device_name()))
                     torch.distributed.broadcast(context_tokens_tensor, src, group)
                     context_tokens = context_tokens_tensor.cpu().numpy().tolist()
 
@@ -333,12 +332,12 @@ def generate_samples_unconditional(model, latencies=[], model_latencies=[], sing
                       for _ in range(args.micro_batch_size)]
     ctr = 0
     while True:
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         start_time = time.time()
         for token_stream in get_token_stream(model,
                                              copy.deepcopy(context_tokens), model_latencies=model_latencies, single_token_latency=single_token_latency):
             pass
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         latencies.append(time.time() - start_time)
         start_time = time.time()
         if mpu.is_pipeline_last_stage() and \
@@ -400,8 +399,8 @@ def get_token_stream(model, context_tokens, model_latencies=[], single_token_lat
     context_tokens, context_lengths = pad_batch(context_tokens,
                                                 tokenizer.eod, args)
 
-    context_tokens_tensor = torch.cuda.LongTensor(context_tokens)
-    context_length_tensor = torch.cuda.LongTensor(context_lengths)
+    context_tokens_tensor = get_accelerator().LongTensor(context_tokens)
+    context_length_tensor = get_accelerator().LongTensor(context_lengths)
 
     torch.distributed.broadcast(context_length_tensor,
                                 mpu.get_tensor_model_parallel_src_rank(),
@@ -416,16 +415,16 @@ def get_token_stream(model, context_tokens, model_latencies=[], single_token_lat
     batch_token_iterator = sample_sequence_batch(model, context_tokens_tensor,
                                                  context_length_tensor,
                                                  attention_mask, position_ids, model_latencies=model_latencies)
-    
+
     count = 0
-    
+
     t0=time.time()
     for tokens, lengths in batch_token_iterator:
         if count > 1:
-           torch.cuda.synchronize()
+           get_accelerator().synchronize()
            t_elapsed = time.time() - t0
            single_token_latency.append(t_elapsed)
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         t0=time.time()
         count+=1
         context_length += 1
@@ -447,7 +446,7 @@ def forward_step(model, tokens, position_ids, attention_mask, tokentype_ids,
 
     # Hidden size changes when not using recompute, need to tell p2p_communicate
     # functions the correct size
-    torch.cuda.synchronize()
+    get_accelerator().synchronize()
     t0 = time.time()
     args = get_args()
     orig_seq_length = args.seq_length
@@ -476,7 +475,7 @@ def forward_step(model, tokens, position_ids, attention_mask, tokentype_ids,
     send_forward(output_tensor)
 
     args.seq_length = orig_seq_length
-    torch.cuda.synchronize()
+    get_accelerator().synchronize()
     model_latencies.append(time.time()-t0)
     if get_key_value:
         return output_tensor, layer_past
@@ -506,14 +505,14 @@ def sample_sequence_batch(model, context_tokens, context_lengths,
 
         layer_past = None
         batch_size = context_tokens.size(0)
-        is_done = torch.zeros([batch_size]).byte().cuda()
+        is_done = torch.zeros([batch_size]).byte().to(get_accelerator().device_name())
         tokens = context_tokens
         if maxlen is None:
             maxlen = args.seq_length - 1
             if maxlen > (org_context_length + args.out_seq_length):
                 maxlen = org_context_length + args.out_seq_length
 
-        lengths = torch.ones([batch_size]).long().cuda() * maxlen
+        lengths = torch.ones([batch_size]).long().to(get_accelerator().device_name()) * maxlen
 
         while context_length <= (maxlen):
             if args.recompute:
@@ -559,9 +558,7 @@ def sample_sequence_batch(model, context_tokens, context_lengths,
                     logits /= args.temperature
                     logits = top_k_logits(logits, top_k=args.top_k,
                                           top_p=args.top_p)
-                    log_probs = torch.ones_like(logits) 
-                    #TODO: Fix this
-                    #log_probs = F.softmax(logits, dim=-1)
+                    log_probs = F.softmax(logits, dim=-1)
                     prev = torch.multinomial(log_probs, num_samples=1).view(-1)
 
                 started = context_lengths <= context_length
@@ -595,7 +592,7 @@ def sample_sequence_batch(model, context_tokens, context_lengths,
                 else:
                     yield None, None
 
-                done = torch.cuda.ByteTensor([0])
+                done = get_accelerator().ByteTensor([0])
                 src = mpu.get_pipeline_model_parallel_last_rank()
                 group = mpu.get_pipeline_model_parallel_group()
                 torch.distributed.broadcast(done, src, group)

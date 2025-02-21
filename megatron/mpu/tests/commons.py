@@ -1,17 +1,4 @@
-# coding=utf-8
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 import argparse
 import os
@@ -20,7 +7,7 @@ import numpy
 import torch
 
 import mpu
-
+from deepspeed.accelerator import get_accelerator
 
 class IdentityLayer(torch.nn.Module):
     def __init__(self, size, scale=1.0):
@@ -56,10 +43,10 @@ def initialize_distributed(backend='nccl'):
           'rank: {}, world size: {}'.format(local_rank, rank, world_size))
 
     # Set the device id.
-    device = rank % torch.cuda.device_count()
+    device = rank % get_accelerator().device_count()
     if local_rank is not None:
         device = local_rank
-    torch.cuda.set_device(device)
+    get_accelerator().set_device(device)
 
     # Call the init process.
     init_method = 'tcp://'
