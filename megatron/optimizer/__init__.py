@@ -1,5 +1,8 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
+from torch.optim import AdamW as TorchAdamW
+from torch.optim import Adam as TorchAdam  
+
 from deepspeed.accelerator import get_accelerator
 if get_accelerator().device_name() == 'cuda':
     from apex.optimizers import FusedAdam as Adam
@@ -82,7 +85,7 @@ def get_megatron_optimizer(model,
 
     if args.cpu_optimizer:
         assert args.optimizer == 'adam', 'CPU offloading is for Adam'
-        if args.cpu_torch_adam:
+        if args.torch_adam:
             cpu_adam_optimizer = torch.optim.AdamW
         else:
             from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -95,10 +98,11 @@ def get_megatron_optimizer(model,
     else:
         if args.optimizer == 'adam':
             if args.ds_fused_adam:
-                global Adam
                 from deepspeed.ops.adam import FusedAdam
-                Adam = FusedAdam
-            optimizer = Adam(param_groups,
+                adam_optimizer = FusedAdam
+            else:
+                adam_optimizer = TorchAdamW if args.torch_adam else Adam 
+            optimizer = adam_optimizer(param_groups,
                             lr=args.lr,
                             weight_decay=args.weight_decay,
                             betas=(args.adam_beta1, args.adam_beta2),

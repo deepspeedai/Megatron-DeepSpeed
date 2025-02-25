@@ -22,6 +22,8 @@ from megatron import (
 from megatron.core import mpu
 from megatron.core.tensor_parallel import param_is_not_tensor_parallel_duplicate
 from megatron.model.module import param_is_not_shared
+
+CHECKPOINT_SIZE = None 
 from megatron.model.rotary_pos_embedding import RotaryEmbedding
 
 
@@ -259,6 +261,14 @@ def is_rank_0():
     else:
         return True
 
+def moe_parameters_in_billions():
+    args = get_args()
+    self_attn = (4 * args.num_layers * (args.hidden_size**2)) + (2 * args.hidden_size)
+    non_expert_fc =  (4 * args.num_layers * (args.hidden_size**2)) + (2 * args.hidden_size)
+    expert_fc = int(args.num_experts[0]) * non_expert_fc
+
+    return (self_attn + non_expert_fc + expert_fc) / 1e9 
+
 def get_parameters_in_billions(model):
     gpus_per_model = torch.distributed.get_world_size(group=mpu.get_model_parallel_group())
 
@@ -311,6 +321,60 @@ def throughput_calculator(model, args, iteration_time, total_iterations):
     tflops = flops_per_iteration / (elapsed_time_per_iter * args.world_size * (10**12))
     return samples_per_second, tflops, approx_parameters_in_billions
 
+
+def _get_folder_size(folder):
+    size = 0
+    for path, _, files in os.walk(folder):
+        size += sum([os.path.getsize(os.path.join(path, f)) for f in files])
+    return size
+
+def get_checkpoint_folder_size(iteration):
+    args = get_args()
+    if args.local_rank == 0:           
+        folder = os.path.join(get_args().save, f'global_step{iteration}')
+        size_tensor = torch.tensor(_get_folder_size(folder)).cuda()
+    else:
+        size_tensor = torch.tensor(0).cuda()
+    
+    torch.distributed.reduce(tensor=size_tensor, dst=0)    
+    return int(size_tensor)
+
+def _replace_auto_config_values(old_config, replace_dict):
+    new_config = {}
+    for key, value in old_config.items():
+        if type(value) == dict:
+            new_config[key] = _replace_auto_config_values(value, replace_dict)
+        elif value == "auto" and replace_dict.get(key, None) is not None:
+            new_config[key] = replace_dict[key]
+        else:
+            new_config[key] = old_config[key]
+    
+    return new_config
+        
+
+def set_ds_auto_config_values(ds_config_dict):
+    from deepspeed.runtime.constants import TRAIN_MICRO_BATCH_SIZE_PER_GPU, TRAIN_BATCH_SIZE
+    from deepspeed.runtime.model_checkpointing.constants import (
+        CHECKPOINT_IO_BUFFER_SIZE, 
+        CHECKPOINT_DATA_PARALLEL,
+        CHECKPOINT_WRITER_DECOUPLED
+    )
+    from deepspeed.runtime.swap_tensor.constants import AIO_INTRA_OP_PARALLELISM
+
+    args = get_args()
+
+    replace_dict = {
+        TRAIN_BATCH_SIZE: args.global_batch_size,
+        TRAIN_MICRO_BATCH_SIZE_PER_GPU: args.micro_batch_size,
+        CHECKPOINT_IO_BUFFER_SIZE: args.checkpoint_io_buffer_size,
+        CHECKPOINT_DATA_PARALLEL: args.checkpoint_data_parallel,
+        CHECKPOINT_WRITER_DECOUPLED: args.checkpoint_writer_decoupled,
+        AIO_INTRA_OP_PARALLELISM: args.aio_intra_op_parallelism
+    }
+
+    ds_config = _replace_auto_config_values(ds_config_dict, replace_dict)
+    return ds_config
+    
 def checkpoint_throughput_calculator(model, latency_second):
     approx_parameters_in_billions = get_parameters_in_billions(model)
     checkpoint_multiplier = 14  # fp16 weights (2), fp32 weights (4), fp32 momentum (4), fp32 variance (4)

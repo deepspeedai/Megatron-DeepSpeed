@@ -42,6 +42,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_memoryopt_args(parser)
     parser = _add_activation_checkpoint_args(parser)
     parser = _add_distillation_args(parser)
+    parser = _add_fast_checkpointing_args(parser)
     parser = _add_inference_args(parser)
     parser = _add_transformer_engine_args(parser)
     parser = _add_retro_args(parser)
@@ -181,6 +182,16 @@ def validate_args(args, defaults={}):
             args.num_layers_per_virtual_pipeline_stage
     else:
         args.virtual_pipeline_model_parallel_size = None
+
+    # MoE
+    if len(args.num_experts) == 1 and args.num_experts[0] == -1:
+        # Hack to set number of experts to world size 
+        args.num_experts = [int(args.world_size)]
+
+    if args.moe_expert_parallel_size is None: 
+        assert len(args.num_experts) == 1, \
+            f'Unspecified --moe-expert-parallel-size only supported for single value --num-experts'
+        args.moe_expert_parallel_size = min(int(args.num_experts[0]), int(args.world_size))
 
     # Parameters dtype.
     args.params_dtype = torch.float
@@ -947,8 +958,8 @@ def _add_training_args(parser):
                        help='DeepSpeed inference engine being used')
     group.add_argument('--cpu-optimizer', action='store_true',
                        help='Run optimizer on CPU')
-    group.add_argument('--cpu_torch_adam', action='store_true',
-                       help='Use Torch Adam as optimizer on CPU.')
+    group.add_argument('--torch_adam', action='store_true',
+                       help='Use Torch Adam as optimizer.')
     group.add_argument('--ds_fused_adam', action='store_true',
                        help='Use DeepSpeed FusedAdam as optimizer.')
     group.add_argument('--no-pipeline-parallel', action='store_true',
@@ -1564,6 +1575,17 @@ def _add_distillation_args(parser):
 
     return parser
 
+def _add_fast_checkpointing_args(parser):
+    group = parser.add_argument_group('Fast Checkpointing configuration')
+    group.add_argument('--checkpoint-io-buffer-size', type=int, default=None, 
+                        help="Fast checkpointing I/O buffer size")
+    group.add_argument('--checkpoint-data-parallel', type=str, default=None,
+                        help='Fast checkpointing data parallelism mode.')
+    group.add_argument('--aio-intra-op-parallelism', type=int, default=None,
+                        help='AIO intra op parallelsm.')
+    group.add_argument('--checkpoint-writer-decoupled', action='store_true',
+                        help='Decoupled checkpointing.')
+    return parser 
 
 def _add_profiler_args(parser):
     group = parser.add_argument_group(title='profiling configuration')

@@ -98,9 +98,9 @@ dtypes = {
     3: np.int16,
     4: np.int32,
     5: np.int64,
-    6: np.float64,
-    7: np.float32,
-    8: np.uint16,
+    6: float,
+    7: np.double,
+    8: np.uint16
 }
 
 
@@ -271,8 +271,8 @@ class IndexedDatasetBuilder(object):
         np.int16: 2,
         np.int32: 4,
         np.int64: 8,
-        np.float32: 4,
-        np.float64: 8,
+        float: 4,
+        np.double: 8
     }
 
     def __init__(self, out_file, dtype=np.int32):
@@ -496,7 +496,7 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
     def __setstate__(self, state):
         self._do_init(state, skip_warmup=True)
 
-    def _do_init(self, path, skip_warmup):
+    def _do_init(self, path, skip_warmup=True):
         self._path = path
         self._index = self.Index(index_file_path(self._path), skip_warmup)
 

@@ -20,7 +20,7 @@ from megatron.arguments import core_transformer_config_from_args
 
 import deepspeed
 from deepspeed.runtime.utils import see_memory_usage
-from deepspeed.accelerator.real_accelerator import get_accelerator
+from deepspeed.accelerator import get_accelerator
 from deepspeed.sequence.fpdt_layer import FPDT_InputConstruct
 import os
 import subprocess

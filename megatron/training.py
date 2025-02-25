@@ -19,7 +19,7 @@ from collections import OrderedDict
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 from enum import Enum
 
-from megatron import get_args
+from megatron import get_args, is_rank_0
 from megatron import get_signal_handler
 from megatron import get_timers
 from megatron import get_tensorboard_writer
@@ -42,13 +42,12 @@ from megatron.initialize import write_args_to_tensorboard
 from megatron.initialize import set_jit_fusion_options
 from megatron.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.model import DistributedDataParallel as LocalDDP
-from megatron.utils import check_adlr_autoresume_termination
+from megatron.utils import check_adlr_autoresume_termination, CHECKPOINT_SIZE, get_checkpoint_folder_size
 from megatron.utils import unwrap_model, found_kill_switch
 from megatron.data.data_samplers import build_pretraining_data_loader
 from megatron.utils import calc_params_l2_norm
 from megatron.core.pipeline_parallel import get_forward_backward_func
-from megatron.utils import report_memory, throughput_calculator, checkpoint_throughput_calculator, update_rotary_pos_emb
-from megatron.model.vision.knn_monitor import compute_feature_bank
+from megatron.utils import report_memory, throughput_calculator, checkpoint_throughput_calculator, update_rotary_pos_emb, set_ds_auto_config_values, moe_parameters_in_billions 
 from megatron.arguments import core_transformer_config_from_args
 from megatron.profiler import setup_profiler, trigger, on_step_begin, on_step_end
 
@@ -83,7 +82,7 @@ def _create_ds_config_dict():
 
     # Clear config path
     args.deepspeed_config = None 
-
+    ds_config_dict = set_ds_auto_config_values(ds_config_dict)
     return ds_config_dict
     
 
@@ -263,7 +262,11 @@ def pretrain(train_valid_test_dataset_provider,
                                    test_data_iterator, model,
                                    iteration, process_non_loss_data_func, config,
                                    verbose=True, write_to_tensorboard=not args.skip_train, test=True)
+    if args.deepspeed:
+        model[0].destroy()
+
     return model
+
 
 
 def update_train_iters(args):
@@ -577,7 +580,7 @@ def setup_model_and_optimizer(model_provider_func,
 
     if args.deepspeed:
         print_rank_0("DeepSpeed is enabled.")
-        pp = mpu.get_pipeline_model_parallel_world_size()
+
         if args.data_efficiency_curriculum_learning and build_train_valid_test_datasets_provider is not None:
             train_ds = None
             # Only need to build dataset on tp rank 0 since Megatron has the
@@ -1182,6 +1185,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         log_string += ' samples per second: {:.3f} |'.format(samples_per_sec)
         log_string += ' tokens per gpu per second (tgs): {:.3f} |'.format(tokens_per_gpu_per_second)
         log_string += ' TFLOPs: {:.2f} |'.format(tflops)
+        log_string += ' params(B): {:.2f} |'.format(approx_parameters_in_billions)
+        log_string += ' moe params(B): {:.2f} |'.format(moe_parameters_in_billions())
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0
@@ -1195,16 +1200,17 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     return report_memory_flag
 
 
+CHECKPOINT_GB = None 
 def save_checkpoint_and_time(iteration, model, optimizer, opt_param_scheduler):
+    global CHECKPOINT_GB  
     timers = get_timers()
     # Extra barrier is added to make sure
-    # all ranks report the max time.
+    # all ranks report the max time.   
     timers('save-checkpoint', log_level=0).start(barrier=True)
     save_checkpoint(iteration, model, optimizer, opt_param_scheduler)
     timers('save-checkpoint').stop(barrier=True)
-    checkpoint_throughput_calculator(model, timers('save-checkpoint').elapsed(reset=False))
+    checkpoint_throughput_calculator(model, timers('save-checkpoint').elapsed(reset=False, barrier=True))
     timers.log(['save-checkpoint'])
-
 
 def train(forward_step_func, model, optimizer, opt_param_scheduler,
           train_data_iterator, valid_data_iterator,
@@ -1308,6 +1314,15 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         params_norm = None
         if args.log_params_norm:
             params_norm = calc_params_l2_norm(model)
+        
+        # Checkpointing
+        saved_checkpoint = False
+        if args.save and args.save_interval and \
+           iteration % args.save_interval == 0:
+            save_checkpoint_and_time(iteration, model, optimizer,
+                                     opt_param_scheduler)
+            saved_checkpoint = True            
+        
         report_memory_flag = training_log(loss_dict, total_loss_dict,
                                           optimizer.param_groups[0]['lr'],
                                           iteration, loss_scale,
@@ -1355,7 +1370,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                 done_cuda, op=torch.distributed.ReduceOp.MAX)
             done = done_cuda.item()
             if done:
-                if not saved_checkpoint:
+                if args.save and not saved_checkpoint:
                     save_checkpoint_and_time(iteration, model, optimizer,
                                              opt_param_scheduler)
                 print_datetime('exiting program after {} minutes'.format(train_time))
@@ -1394,6 +1409,7 @@ def evaluate(forward_step_func,
     args = get_args()
 
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
+        from megatron.model.vision.knn_monitor import compute_feature_bank
         compute_feature_bank(model)
 
     # Turn on evaluation mode which disables dropout.
