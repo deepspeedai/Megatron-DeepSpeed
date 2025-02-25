@@ -1185,9 +1185,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         log_string += ' samples per second: {:.3f} |'.format(samples_per_sec)
         log_string += ' tokens per gpu per second (tgs): {:.3f} |'.format(tokens_per_gpu_per_second)
         log_string += ' TFLOPs: {:.2f} |'.format(tflops)
-        log_string += ' \n TeraFLOPs: {:.2f} |'.format(tflops)
         log_string += ' params(B): {:.2f} |'.format(approx_parameters_in_billions)
-        log_string += ' moe params(B): {:.2f}|'.format(moe_parameters_in_billions())
+        log_string += ' moe params(B): {:.2f} |'.format(moe_parameters_in_billions())
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0

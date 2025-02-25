@@ -108,7 +108,6 @@ def average_losses_across_data_parallel_group(losses):
 
 
 def report_memory(name):
-    return 
     """Simple GPU memory report."""
     mega_bytes = 1024.0 * 1024.0
     string = name + ' memory (MB)'
