@@ -48,7 +48,6 @@ from megatron.data.data_samplers import build_pretraining_data_loader
 from megatron.utils import calc_params_l2_norm
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory, throughput_calculator, checkpoint_throughput_calculator, update_rotary_pos_emb, set_ds_auto_config_values, moe_parameters_in_billions 
-from megatron.model.vision.knn_monitor import compute_feature_bank
 from megatron.arguments import core_transformer_config_from_args
 from megatron.profiler import setup_profiler, trigger, on_step_begin, on_step_end
 
@@ -581,17 +580,6 @@ def setup_model_and_optimizer(model_provider_func,
 
     if args.deepspeed:
         print_rank_0("DeepSpeed is enabled.")
-        pp = mpu.get_pipeline_model_parallel_world_size()
-        
-        ds_config = get_deepspeed_config()
-        model, optimizer, _, lr_scheduler = deepspeed.initialize(
-            model=model[0],
-            optimizer=optimizer,
-            args=args,
-            lr_scheduler=lr_scheduler,
-            mpu=mpu if args.no_pipeline_parallel else None,
-            config=ds_config
-        )
 
         if args.data_efficiency_curriculum_learning and build_train_valid_test_datasets_provider is not None:
             train_ds = None
@@ -1218,26 +1206,12 @@ def save_checkpoint_and_time(iteration, model, optimizer, opt_param_scheduler):
     global CHECKPOINT_GB  
     timers = get_timers()
     # Extra barrier is added to make sure
-    # all ranks report the max time.
-    torch.distributed.barrier()
-    if CHECKPOINT_GB is None:
-        pre_folder_size = get_checkpoint_folder_size(iteration)
-    
-    timers('save-checkpoint').start()
+    # all ranks report the max time.   
+    timers('save-checkpoint', log_level=0).start(barrier=True)
     save_checkpoint(iteration, model, optimizer, opt_param_scheduler)
-    torch.distributed.barrier()
-    timers('save-checkpoint').stop()
-    latency_second = timers('save-checkpoint').elapsed(reset=False)
-
-    if CHECKPOINT_GB is None:
-        post_folder_size = get_checkpoint_folder_size(iteration)
-        CHECKPOINT_GB = (post_folder_size - pre_folder_size) / (1024)**3
-
-    gb_per_sec = CHECKPOINT_GB / latency_second
-    print_rank_0(f"Checkpoint Save GB: {round(CHECKPOINT_GB, 2)}, GB/Sec: {round(gb_per_sec, 2)}, Latency(second): {round(latency_second, 3)}")
-
-    #timers.log(['save-checkpoint'])
-
+    timers('save-checkpoint').stop(barrier=True)
+    checkpoint_throughput_calculator(model, timers('save-checkpoint').elapsed(reset=False, barrier=True))
+    timers.log(['save-checkpoint'])
 
 def train(forward_step_func, model, optimizer, opt_param_scheduler,
           train_data_iterator, valid_data_iterator,
@@ -1347,7 +1321,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         if args.save and args.save_interval and \
            iteration % args.save_interval == 0:
             save_checkpoint_and_time(iteration, model, optimizer,
-                                     lr_scheduler)
+                                     opt_param_scheduler)
             saved_checkpoint = True            
         
         report_memory_flag = training_log(loss_dict, total_loss_dict,
@@ -1436,6 +1410,7 @@ def evaluate(forward_step_func,
     args = get_args()
 
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
+        from megatron.model.vision.knn_monitor import compute_feature_bank
         compute_feature_bank(model)
 
     # Turn on evaluation mode which disables dropout.

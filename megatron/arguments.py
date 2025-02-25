@@ -958,8 +958,8 @@ def _add_training_args(parser):
                        help='DeepSpeed inference engine being used')
     group.add_argument('--cpu-optimizer', action='store_true',
                        help='Run optimizer on CPU')
-    group.add_argument('--cpu_torch_adam', action='store_true',
-                       help='Use Torch Adam as optimizer on CPU.')
+    group.add_argument('--torch_adam', action='store_true',
+                       help='Use Torch Adam as optimizer.')
     group.add_argument('--ds_fused_adam', action='store_true',
                        help='Use DeepSpeed FusedAdam as optimizer.')
     group.add_argument('--no-pipeline-parallel', action='store_true',
@@ -1587,6 +1587,7 @@ def _add_fast_checkpointing_args(parser):
                         help='AIO intra op parallelsm.')
     group.add_argument('--checkpoint-writer-decoupled', action='store_true',
                         help='Decoupled checkpointing.')
+    return parser 
 
 def _add_profiler_args(parser):
     group = parser.add_argument_group(title='profiling configuration')

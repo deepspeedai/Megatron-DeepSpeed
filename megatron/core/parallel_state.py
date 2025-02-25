@@ -670,6 +670,11 @@ def get_data_parallel_src_rank():
     return _DATA_PARALLEL_GLOBAL_RANKS[0]
 
 
+def get_data_parallel_group_ranks():
+    """Return all the ranks in the data parallel group."""
+    assert _DATA_PARALLEL_GLOBAL_RANKS is not None, "Data parallel group is not initialized"
+    return _DATA_PARALLEL_GLOBAL_RANKS
+
 def get_pipeline_model_parallel_first_rank():
     """Return the global rank of the first process in the pipeline for the
     current tensor parallel group"""
