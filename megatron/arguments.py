@@ -1169,8 +1169,6 @@ def _add_distributed_args(parser):
                        help='Rank where encoder and decoder should be split.')
     group.add_argument('--moe-expert-parallel-size', type=int, default=1,
                        help='Degree of the MoE expert parallelism.')
-    group.add_argument('--num-local-experts', type=int, default=None,
-                        help='Number of local experts per rank, overrides --moe-expert-parallel-size.')                       
     group.add_argument('--model-parallel-size', type=int, default=None,
                        help='Old model parallel argument, do not use. Use '
                        '--tensor-model-parallel-size instead.')

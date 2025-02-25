@@ -28,20 +28,20 @@ SEQ_LEN=2048
 # MIN_LR=3.0e-5
 
 ## GPT-3 Large 760M
-MODEL_SIZE=0.76
-NUM_LAYERS=24
-HIDDEN_SIZE=1536
-NUM_ATTN_HEADS=16
-GLOBAL_BATCH_SIZE=256
+# MODEL_SIZE=0.76
+# NUM_LAYERS=24
+# HIDDEN_SIZE=1536
+# NUM_ATTN_HEADS=16
+# GLOBAL_BATCH_SIZE=256
 # LR=2.5e-4
 # MIN_LR=2.5e-5
 
 ## GPT-3 XL 1.3B
-# MODEL_SIZE=1.3
-# NUM_LAYERS=24
-# HIDDEN_SIZE=2048
-# NUM_ATTN_HEADS=16
-# GLOBAL_BATCH_SIZE=512
+MODEL_SIZE=1.3
+NUM_LAYERS=24
+HIDDEN_SIZE=2048
+NUM_ATTN_HEADS=16
+GLOBAL_BATCH_SIZE=512
 # LR=2.0e-4
 # MIN_LR=2.0e-5
 
@@ -123,8 +123,8 @@ NUM_GPUS=64
 ###############################################################################
 ### MoE configs
 ## Number of experts. EP_SIZE 1 means dense model without MoE
-EP_SIZE=1
-#EP_SIZE=128
+# EP_SIZE=1
+EP_SIZE=128
 
 if [[ $EP_SIZE -gt $NUM_GPUS ]]; then
     EP_PARALLEL_SIZE=$NUM_GPUS
@@ -166,10 +166,10 @@ CL_TOKENS=$((${CL_TOKENS} * 1000000000))
 CL_STEP=$(( ${CL_TOKENS} / (${GLOBAL_BATCH_SIZE} * ${CL_AVG_SEQLEN}) ))
 ###############################################################################
 ### Misc configs
-LOG_INTERVAL=1 # 10
+LOG_INTERVAL=10
 EVAL_ITERS=10
 EVAL_INTERVAL=100
-SAVE_INTERVAL=1 # 10000
+SAVE_INTERVAL=10000
 
 ## Standard deviation for weight initialization
 ## We used 0.014 for 350M/1.3B dense/MoE models, and used 0.01 for 6.7B
@@ -200,7 +200,7 @@ TENSORBOARD_DIR="${OUTPUT_BASEPATH}/tensorboard/${NAME}_${host}_${current_time}"
 mkdir -p ${TENSORBOARD_DIR} 
 ## Note that for MoE model with billion-scale base model, the checkpoint can be
 ## as large as TB-scale which normal NFS cannot handle efficiently.
-CHECKPOINT_PATH=/nvme/fast_io/basic_ckpt/moe/${NAME} # "${OUTPUT_BASEPATH}/checkpoint/${NAME}"
+CHECKPOINT_PATH="${OUTPUT_BASEPATH}/checkpoint/${NAME}"
 
 # USE_INTERNAL_DATA="true"
 USE_INTERNAL_DATA="false"
@@ -244,9 +244,6 @@ else
     # Public the Pile dataset, can be downloaded at https://mystic.the-eye.eu/public/AI/pile_neox/
     DATA_BLEND=/data/the_pile_public_merged_nopreprocessing/pile_text_document
 fi
-VOCAB_PATH="dataset/gpt2-vocab.json"
-MERGE_PATH="dataset/gpt2-merges.txt"
-DATA_BLEND="dataset/BookCorpusDataset_text_document"
 ###############################################################################
 data_options=" \
          --vocab-file ${VOCAB_PATH} \
@@ -281,27 +278,23 @@ megatron_options=" \
         --lr ${LR} \
         --min-lr ${MIN_LR} \
         --lr-decay-style cosine \
-        --split 100,0,0 \
+        --split 98,2,0 \
         --log-interval ${LOG_INTERVAL} \
         --eval-interval ${EVAL_INTERVAL} \
         --eval-iters ${EVAL_ITERS} \
+        --save-interval ${SAVE_INTERVAL} \
         --weight-decay 0.1 \
         --clip-grad 1.0 \
         --hysteresis 2 \
         --num-workers 0 \
         --fp16 \
-        --no-pipeline-parallel \
-"
-
-        # --save-interval ${SAVE_INTERVAL} \
-        # --save ${CHECKPOINT_PATH} \
-
-#        --load ${CHECKPOINT_PATH} \
-        # --tensorboard-queue-size 1 \
-        # --log-timers-to-tensorboard \
-        # --log-batch-size-to-tensorboard \
-        # --log-validation-ppl-to-tensorboard \
-        # --tensorboard-dir ${TENSORBOARD_DIR}
+        --load ${CHECKPOINT_PATH} \
+        --save ${CHECKPOINT_PATH} \
+        --tensorboard-queue-size 1 \
+        --log-timers-to-tensorboard \
+        --log-batch-size-to-tensorboard \
+        --log-validation-ppl-to-tensorboard \
+        --tensorboard-dir ${TENSORBOARD_DIR}"
 
 if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
 megatron_options="${megatron_options} \
@@ -349,13 +342,7 @@ deepspeed_options="${deepspeed_options} \
         --deepspeed-activation-checkpointing"
 fi
 
-# run_cmd="deepspeed ${DIR}/../../pretrain_gpt.py ${megatron_options} ${data_options} ${deepspeed_options} &> ${OUTPUT_BASEPATH}/log/${NAME}_${host}_${current_time}.log"
-
-run_cmd="deepspeed --num_nodes 1 --num_gpus $NUM_GPUS\
-        ${DIR}/../../pretrain_gpt.py ${megatron_options} ${data_options} ${deepspeed_options} \
-        &> /tmp/logs/moe/${NAME}.log"
-
-
+run_cmd="deepspeed ${DIR}/../../pretrain_gpt.py ${megatron_options} ${data_options} ${deepspeed_options} &> ${OUTPUT_BASEPATH}/log/${NAME}_${host}_${current_time}.log"
 echo ${run_cmd}
 eval ${run_cmd}
 set +x
