@@ -731,12 +731,23 @@ class ParallelAttention(MegatronModule):
                 query_layer = mixed_x_layer[:, :, :self.projection_size].reshape(seq_len, bs, -1, self.head_dim)
                 key_layer = mixed_x_layer[:, :, self.projection_size:self.projection_size+self.kv_projection_size].reshape(seq_len, bs, -1, self.head_dim)
                 value_layer = mixed_x_layer[:, :, self.projection_size+self.kv_projection_size:].reshape(seq_len, bs, -1, self.head_dim)
-            if self.sequence_parallel or not self.enable_ds_sequence_parallel:
+            if self.sequence_parallel and not self.enable_ds_sequence_parallel:
                 seq_len, bs = mixed_x_layer.shape[0], mixed_x_layer.shape[1]
                 each_hidden_size = mixed_x_layer.shape[-1] // 3
                 query_layer = mixed_x_layer[:, :, :each_hidden_size].reshape(seq_len, bs, -1, self.head_dim)
                 key_layer = mixed_x_layer[:, :, each_hidden_size:each_hidden_size+each_hidden_size].reshape(seq_len, bs, -1, self.head_dim)
                 value_layer = mixed_x_layer[:, :, each_hidden_size+each_hidden_size:].reshape(seq_len, bs, -1, self.head_dim)
+            else:
+                # [sq, b, ((nq + 2 * nkv) * hn)] --> [sq, b, nkv, (nq // nkv + 2), hn]
+                new_tensor_shape = mixed_x_layer.size()[:-1] + \
+                    (-1, (self.num_key_value_groups + 2),
+                    self.hidden_size_per_attention_head)
+                mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
+
+                # [sq, b, nkv, (nq // nkv + 2), hn] --> 3 [sq, b, np, hn]
+                (query_layer,
+                 key_layer,
+                 value_layer) = self.split_tensor(mixed_x_layer)
 
             # Repeat kv
             if self.use_gqa:
