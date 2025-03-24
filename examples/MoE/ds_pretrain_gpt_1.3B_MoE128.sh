@@ -28,38 +28,38 @@ SEQ_LEN=2048
 # MIN_LR=3.0e-5
 
 ## GPT-3 Large 760M
-MODEL_SIZE=0.76
-NUM_LAYERS=24
-HIDDEN_SIZE=1536
-NUM_ATTN_HEADS=16
-GLOBAL_BATCH_SIZE=256
+#MODEL_SIZE=0.76
+#NUM_LAYERS=24
+#HIDDEN_SIZE=1536
+#NUM_ATTN_HEADS=16
+#GLOBAL_BATCH_SIZE=16
 # LR=2.5e-4
 # MIN_LR=2.5e-5
 
 ## GPT-3 XL 1.3B
-# MODEL_SIZE=1.3
-# NUM_LAYERS=24
-# HIDDEN_SIZE=2048
-# NUM_ATTN_HEADS=16
-# GLOBAL_BATCH_SIZE=512
+#MODEL_SIZE=1.3
+#NUM_LAYERS=24
+#HIDDEN_SIZE=2048
+#NUM_ATTN_HEADS=16
+#GLOBAL_BATCH_SIZE=16
 # LR=2.0e-4
 # MIN_LR=2.0e-5
 
 ## GPT-3 2.7B
-# MODEL_SIZE=2.7
-# NUM_LAYERS=32
-# HIDDEN_SIZE=2560
-# NUM_ATTN_HEADS=32
-# GLOBAL_BATCH_SIZE=512
+#MODEL_SIZE=2.7
+#NUM_LAYERS=32
+#HIDDEN_SIZE=2560
+#NUM_ATTN_HEADS=32
+#GLOBAL_BATCH_SIZE=16
 # LR=1.6e-4
 # MIN_LR=1.6e-5
 
 ## GPT-3 6.7B
-# MODEL_SIZE=6.7
-# NUM_LAYERS=32
-# HIDDEN_SIZE=4096
-# NUM_ATTN_HEADS=32
-# GLOBAL_BATCH_SIZE=1024
+MODEL_SIZE=6.7
+NUM_LAYERS=32
+HIDDEN_SIZE=4096
+NUM_ATTN_HEADS=32
+GLOBAL_BATCH_SIZE=8
 # LR=1.2e-4
 # MIN_LR=1.2e-5
 
@@ -110,17 +110,18 @@ LR_DECAY_TOKENS=300000000000
 ### Parallelism configs
 ## Micro batch size per GPU
 ## Make sure that BATCH_SIZE <= GLOBAL_BATCH_SIZE*PP_SIZE*MP_SIZE/NUM_GPUS
-BATCH_SIZE=8
+BATCH_SIZE=4
 
 ## Model parallelism, 1 is no MP
 ## Currently MoE models have divergence issue when MP > 1.
 MP_SIZE=1
+TP_SIZE=2
 
 ## Pipeline parallelism
 ## Currently we don't support PP for MoE. To disable PP, set PP_SIZE
 ## to 1 and use the "--no-pipeline-parallel" arg.
 PP_SIZE=1
-NUM_GPUS=64
+NUM_GPUS=2
 ###############################################################################
 ### MoE configs
 ## Number of experts. EP_SIZE 1 means dense model without MoE
@@ -170,7 +171,6 @@ CL_STEP=$(( ${CL_TOKENS} / (${GLOBAL_BATCH_SIZE} * ${CL_AVG_SEQLEN}) ))
 LOG_INTERVAL=1 # 10
 EVAL_ITERS=10
 EVAL_INTERVAL=100
-SAVE_INTERVAL=1 # 10000
 
 ## Standard deviation for weight initialization
 ## We used 0.014 for 350M/1.3B dense/MoE models, and used 0.01 for 6.7B
@@ -180,7 +180,6 @@ INIT_STD=0.014
 
 ## Activation checkpointing saves GPU memory, but reduces training speed
 ACTIVATION_CHECKPOINT="true"
-# ACTIVATION_CHECKPOINT="false"
 ###############################################################################
 ### Output and data configs
 current_time=$(date "+%Y.%m.%d-%H.%M.%S")
@@ -201,7 +200,7 @@ TENSORBOARD_DIR="${OUTPUT_BASEPATH}/tensorboard/${NAME}_${host}_${current_time}"
 mkdir -p ${TENSORBOARD_DIR} 
 ## Note that for MoE model with billion-scale base model, the checkpoint can be
 ## as large as TB-scale which normal NFS cannot handle efficiently.
-CHECKPOINT_PATH=/nvme/fast_io/basic_ckpt/moe/${NAME} # "${OUTPUT_BASEPATH}/checkpoint/${NAME}"
+CHECKPOINT_PATH=/mnt/nvme01/fast_io_tests/${NAME} # "${OUTPUT_BASEPATH}/checkpoint/${NAME}"
 
 # USE_INTERNAL_DATA="true"
 USE_INTERNAL_DATA="false"
@@ -212,7 +211,7 @@ if [ "${USE_INTERNAL_DATA}" = "true" ]; then
     # BASE_DATA_PATH=/vc_data/Megatron-LM/data
     # DATA_HOME="/vc_data/pile-cc1-cc2-shuf"
     ## For cluster Lab-RR1-V100
-    BASE_DATA_PATH=/data/Megatron-LM/data
+    BASE_DATA_PATH=/home/deepspeed/Megatron-DeepSpeed/dataset
     DATA_HOME="/turing-ssd/users/conglli/data/pile-cc1-cc2-shuf"
     ## For cluster Azure-CentralUS-A100
     # BASE_DATA_PATH=/data/Megatron-LM/data
@@ -245,9 +244,14 @@ else
     # Public the Pile dataset, can be downloaded at https://mystic.the-eye.eu/public/AI/pile_neox/
     DATA_BLEND=/data/the_pile_public_merged_nopreprocessing/pile_text_document
 fi
-VOCAB_PATH="dataset/gpt2-vocab.json"
-MERGE_PATH="dataset/gpt2-merges.txt"
-DATA_BLEND="dataset/BookCorpusDataset_text_document"
+
+BASE_DATA_PATH=/home/deepspeed/Megatron-DeepSpeed/dataset
+VOCAB_PATH=${BASE_DATA_PATH}/gpt2-vocab.json
+MERGE_PATH=${BASE_DATA_PATH}/gpt2-merges.txt
+DATA_BLEND=${BASE_DATA_PATH}/BookCorpusDataset_text_document
+
+BUFFER_SIZE=$((4*1073741824))
+
 ###############################################################################
 data_options=" \
          --vocab-file ${VOCAB_PATH} \
@@ -261,6 +265,7 @@ megatron_options=" \
         --adam-beta2 0.95 \
         --tensor-model-parallel-size ${MP_SIZE} \
         --moe-expert-parallel-size ${EP_PARALLEL_SIZE} \
+        --tensor-model-parallel-size $TP_SIZE \
         --num-experts ${EP_SIZE} \
         --moe-loss-coeff ${MLC} \
         --moe-train-capacity-factor ${MOE_TRAIN_CAP_FACTOR} \
@@ -283,7 +288,7 @@ megatron_options=" \
         --min-lr ${MIN_LR} \
         --lr-decay-style cosine \
         --split 100,0,0 \
-        --log-interval ${LOG_INTERVAL} \
+        --log-interval 10 \
         --eval-interval ${EVAL_INTERVAL} \
         --eval-iters ${EVAL_ITERS} \
         --weight-decay 0.1 \
@@ -292,11 +297,17 @@ megatron_options=" \
         --num-workers 0 \
         --fp16 \
         --no-pipeline-parallel \
+        --save-interval 10 \
+        --save ${CHECKPOINT_PATH} \
+
 "
 
-        # --save-interval ${SAVE_INTERVAL} \
-        # --save ${CHECKPOINT_PATH} \
+        #--checkpoint-writer-type fast \
+        #--checkpoint-io-buffer-size ${BUFFER_SIZE} \
+        #--aio-thread-count 8 \
+        #--checkpoint-writer-decoupled \
 
+        #--checkpoint-data-parallel socket \
 #        --load ${CHECKPOINT_PATH} \
         # --tensorboard-queue-size 1 \
         # --log-timers-to-tensorboard \
@@ -353,8 +364,7 @@ fi
 # run_cmd="deepspeed ${DIR}/../../pretrain_gpt.py ${megatron_options} ${data_options} ${deepspeed_options} &> ${OUTPUT_BASEPATH}/log/${NAME}_${host}_${current_time}.log"
 
 run_cmd="deepspeed --num_nodes 1 --num_gpus $NUM_GPUS\
-        ${DIR}/../../pretrain_gpt.py ${megatron_options} ${data_options} ${deepspeed_options} \
-        &> /tmp/logs/moe/${NAME}.log"
+        ${DIR}/../../pretrain_gpt.py ${megatron_options} ${data_options} ${deepspeed_options}"
 
 
 echo ${run_cmd}

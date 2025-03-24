@@ -265,25 +265,31 @@ def get_checkpoint_folder_size(iteration):
     torch.distributed.reduce(tensor=size_tensor, dst=0)    
     return int(size_tensor)
 
-def _replace_auto_config_values(old_config, replace_dict):
+def _replace_auto_config_values(old_config, replace_dict, depth):
     new_config = {}
     for key, value in old_config.items():
         if type(value) == dict:
-            new_config[key] = _replace_auto_config_values(value, replace_dict)
+            new_config[key] = _replace_auto_config_values(value, replace_dict, (depth+1))
         elif value == "auto" and replace_dict.get(key, None) is not None:
             new_config[key] = replace_dict[key]
         else:
             new_config[key] = old_config[key]
-    
+        if key in replace_dict.keys():
+            del replace_dict[key] 
+    if depth == 1:
+        new_config = new_config | replace_dict
     return new_config
         
 
 def get_deepspeed_config():
     from deepspeed.runtime.constants import TRAIN_MICRO_BATCH_SIZE_PER_GPU, TRAIN_BATCH_SIZE
     from deepspeed.runtime.model_checkpointing.constants import (
+        CHECKPOINT_WRITER,
+        CHECKPOINT_WRITER_TYPE,
         CHECKPOINT_IO_BUFFER_SIZE, 
         CHECKPOINT_DATA_PARALLEL,
-        CHECKPOINT_WRITER_DECOUPLED
+        CHECKPOINT_WRITER_DECOUPLED,
+        CHECKPOINT_IO_STATISTICS
     )
     from deepspeed.runtime.swap_tensor.constants import AIO_THREAD_COUNT
 
@@ -291,12 +297,17 @@ def get_deepspeed_config():
     replace_dict = {
         TRAIN_BATCH_SIZE: args.global_batch_size,
         TRAIN_MICRO_BATCH_SIZE_PER_GPU: args.micro_batch_size,
-        CHECKPOINT_IO_BUFFER_SIZE: args.checkpoint_io_buffer_size,
-        CHECKPOINT_DATA_PARALLEL: args.checkpoint_data_parallel,
-        CHECKPOINT_WRITER_DECOUPLED: args.checkpoint_writer_decoupled,
         AIO_THREAD_COUNT: args.aio_thread_count
     }
-
+    if args.checkpoint_writer_type is not None:
+        replace_dict["checkpoint"] = {}
+        replace_dict["checkpoint"]["writer"] = {
+            CHECKPOINT_WRITER_TYPE: args.checkpoint_writer_type,
+            CHECKPOINT_IO_BUFFER_SIZE: args.checkpoint_io_buffer_size,
+            CHECKPOINT_DATA_PARALLEL: args.checkpoint_data_parallel,
+            CHECKPOINT_WRITER_DECOUPLED: args.checkpoint_writer_decoupled,
+            CHECKPOINT_IO_STATISTICS: args.checkpoint_statistics
+        }
     with open(args.deepspeed_config, 'r') as fd:
         input_config = json.load(fd)
         # if ds_config.get(TRAIN_BATCH_SIZE, None) == "auto":
@@ -304,6 +315,6 @@ def get_deepspeed_config():
 
         # if ds_config.get(TRAIN_MICRO_BATCH_SIZE_PER_GPU, None) == "auto" :
         #     ds_config[TRAIN_MICRO_BATCH_SIZE_PER_GPU] = args.micro_batch_size
-        ds_config = _replace_auto_config_values(input_config, replace_dict)
+        ds_config = _replace_auto_config_values(input_config, replace_dict, 1)
         return ds_config
 
