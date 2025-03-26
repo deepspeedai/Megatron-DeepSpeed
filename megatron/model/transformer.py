@@ -298,10 +298,10 @@ class CoreAttention(MegatronModule):
                        key_layer.size(0))
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
-        query_layer = query_layer.view(output_size[2],
+        query_layer = query_layer.reshape(output_size[2],
                                        output_size[0] * output_size[1], -1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
-        key_layer = key_layer.view(output_size[3],
+        key_layer = key_layer.reshape(output_size[3],
                                    output_size[0] * output_size[1], -1)
 
         # preallocting input tensor: [b * np, sq, sk]
@@ -317,7 +317,7 @@ class CoreAttention(MegatronModule):
             beta=0.0, alpha=(1.0/self.norm_factor))
 
         # change view to [b, np, sq, sk]
-        attention_scores = matmul_result.view(*output_size)
+        attention_scores = matmul_result.reshape(*output_size)
 
         # ===========================
         # Attention probs and dropout
@@ -349,18 +349,18 @@ class CoreAttention(MegatronModule):
                        value_layer.size(3))
 
         # change view [sk, b * np, hn]
-        value_layer = value_layer.view(value_layer.size(0),
+        value_layer = value_layer.reshape(value_layer.size(0),
                                        output_size[0] * output_size[1], -1)
 
         # change view [b * np, sq, sk]
-        attention_probs = attention_probs.view(output_size[0] * output_size[1],
+        attention_probs = attention_probs.reshape(output_size[0] * output_size[1],
                                                output_size[2], -1)
 
         # matmul: [b * np, sq, hn]
         context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
 
         # change view [b, np, sq, hn]
-        context_layer = context_layer.view(*output_size)
+        context_layer = context_layer.reshape(*output_size)
 
         # [b, np, sq, hn] --> [sq, b, np, hn]
         context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
@@ -368,7 +368,7 @@ class CoreAttention(MegatronModule):
         # [sq, b, np, hn] --> [sq, b, hp]
         new_context_layer_shape = context_layer.size()[:-2] + \
             (self.hidden_size_per_partition,)
-        context_layer = context_layer.view(*new_context_layer_shape)
+        context_layer = context_layer.reshape(*new_context_layer_shape)
 
         return context_layer
 
@@ -753,7 +753,7 @@ class ParallelAttention(MegatronModule):
             new_tensor_shape = mixed_kv_layer.size()[:-1] + \
                 (self.num_attention_heads_per_partition,
                  2 * self.hidden_size_per_attention_head)
-            mixed_kv_layer = mixed_kv_layer.view(*new_tensor_shape)
+            mixed_kv_layer = mixed_kv_layer.reshape(*new_tensor_shape)
 
             # [sk, b, np, 2 * hn] --> 2 [sk, b, np, hn]
             (key_layer,
@@ -765,7 +765,7 @@ class ParallelAttention(MegatronModule):
             new_tensor_shape = query_layer.size()[:-1] + \
                 (self.num_attention_heads_per_partition,
                  self.hidden_size_per_attention_head)
-            query_layer = query_layer.view(*new_tensor_shape)
+            query_layer = query_layer.reshape(*new_tensor_shape)
 
         # ==================================
         # Adjust key and value for inference

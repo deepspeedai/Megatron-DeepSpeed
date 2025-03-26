@@ -537,7 +537,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     """
     args = get_args()
     load_dir = getattr(args, load_arg)
-
+    
     if args.deepspeed:
         if args.finetune:
             loaded_dir, state_dict = model[0].load_checkpoint(load_dir,
@@ -548,6 +548,11 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
             loaded_dir, state_dict = model[0].load_checkpoint(load_dir,
                 load_module_strict=strict, tag=args.load_tag)
         if loaded_dir is None:
+            if model[0].zero_ignore_missing_optim_state:
+                print_rank_0("HF-based UCP does not contain model_states.pt file")
+                print_rank_0("  and hence we do not have iteration and rng_state info")
+                return args.resume_iteration
+
             print_rank_0('WARNING: could not find the metadata file {} '.format(
                 load_dir))
             print_rank_0('    will not load any checkpoints and will start from '

@@ -13,47 +13,59 @@ script_path=$(realpath $0)
 script_dir=$(dirname $script_path)
 CONFIG_JSON="$script_dir/ds_config.json"
 
-ZERO_STAGE=1
+# Check if ZERO_STAGE is set, default to 1 if not
+ZERO_STAGE=${ZERO_STAGE:-1}
+IGNORE_MISSING_OPTIM=${IGNORE_MISSING_OPTIM:-false}
+
+# Convert string to lowercase to handle different cases (TRUE, True, true, etc)
+IGNORE_MISSING_OPTIM_LOWER=$(echo "$IGNORE_MISSING_OPTIM" | tr '[:upper:]' '[:lower:]')
+
+# Validate ZERO_STAGE
+if [[ ! $ZERO_STAGE =~ ^[1-3]$ ]]; then
+    echo "Error: ZERO_STAGE must be 1, 2, or 3"
+    exit 1
+fi
+
 DTYPE="bf16"
+EXIT_INTERVAL=200
 
 # Debug
-DEBUG_MODE=1
+DEBUG_MODE=${DEBUG_MODE:-0}
 if [[ $DEBUG_MODE == 1 ]]; then
         LAYERS=4
         HIDDEN=512
         SEQ=512
-        EXIT_INTERVAL=200
         SIZE_TAG="toy"
 else
         HIDDEN=1024
         LAYERS=24
         SEQ=1024
-        EXIT_INTERVAL=100
         SIZE_TAG="big"
 fi  
 
-# 3D parallelism of training 
-TP=2
-PP=2
-DP=1
-SP=1
+# 3D parallelism of training to continue run
+TP=${TP:-1}
+PP=${PP:-1}
+DP=${DP:-1}
+SP=${SP:-1}
 WORLD_SIZE=$((TP*PP*DP*SP))
-GLOBAL_BATCH=4
-MICRO_BATCH=$((GLOBAL_BATCH/WORLD_SIZE))
+MICRO_BATCH=${MICRO_BATCH:-4}
+GLOBAL_BATCH=$((MICRO_BATCH*WORLD_SIZE))
 TRAIN_ITERS=100000
 LR=6.0e-3
 MIN_LR=6.0e-4
 
-# 3D parallelism of checkpoint to load
-LOAD_TP=2
-LOAD_PP=2
-LOAD_DP=2
-LOAD_SP=1
+# 3D parallelism of checkpoint to load from
+LOAD_TP=${LOAD_TP:-1}
+LOAD_PP=${LOAD_PP:-1}
+LOAD_DP=${LOAD_DP:-1}
+LOAD_SP=${LOAD_SP:-1}
+LOAD_MICRO_BATCH=${LOAD_MICRO_BATCH:-4}
 RUN_TAG="uni_load${LOAD_TP}_${LOAD_PP}_${LOAD_DP}_${LOAD_SP}"
 
 EXP_DIR="z${ZERO_STAGE}_uni_ckpt" 
-CHECKPOINT_PATH=${EXP_DIR}/checkpoints/gpt2/z${ZERO_STAGE}/$DTYPE/tp${TP}_pp${PP}_dp${DP}_sp${SP}_${SIZE_TAG}
-LOAD_CHECKPOINT_PATH=${EXP_DIR}/checkpoints/gpt2/z${ZERO_STAGE}/$DTYPE/tp${LOAD_TP}_pp${LOAD_PP}_dp${LOAD_DP}_sp${LOAD_SP}_${SIZE_TAG}
+CHECKPOINT_PATH=${EXP_DIR}/checkpoints/gpt2/z${ZERO_STAGE}/$DTYPE/tp${TP}_pp${PP}_dp${DP}_sp${SP}_mb${MICRO_BATCH}_${SIZE_TAG}
+LOAD_CHECKPOINT_PATH=${EXP_DIR}/checkpoints/gpt2/z${ZERO_STAGE}/$DTYPE/tp${LOAD_TP}_pp${LOAD_PP}_dp${LOAD_DP}_sp${LOAD_SP}_mb${LOAD_MICRO_BATCH}_${SIZE_TAG}
 LOG_DIR="${EXP_DIR}/tensorboard/$DTYPE/tp${TP}_pp${PP}_dp${DP}_sp${SP}_hd${HIDDEN}_nl${LAYERS}_gbsz${GLOBAL_BATCH}_mbsz${MICRO_BATCH}_z${ZERO_STAGE}_LR_${LR}_${MIN_LR}_${DTYPE}_${SIZE_TAG}_${RUN_TAG}"
 mkdir -p $LOG_DIR
 
@@ -125,6 +137,12 @@ options="${options} \
     --no-pipeline-parallel"
 fi
 
+if [[ $IGNORE_MISSING_OPTIM_LOWER == "true" ]]; then
+    options="${options} \
+        --no-load-rng \
+        --resume-iteration=100"
+fi
+
 cat <<EOT > $CONFIG_JSON
 {
   "train_batch_size" : $GLOBAL_BATCH,
@@ -132,7 +150,8 @@ cat <<EOT > $CONFIG_JSON
   "steps_per_print": 1,
 
   "zero_optimization": {
-    "stage": $ZERO_STAGE
+    "stage": $ZERO_STAGE,
+    "ignore_missing_optim_state": $([ "$IGNORE_MISSING_OPTIM_LOWER" = "true" ] && echo "true" || echo "false")
   },
 
   "bf16": {

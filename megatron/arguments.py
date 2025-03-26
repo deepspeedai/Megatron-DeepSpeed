@@ -857,7 +857,8 @@ def _add_training_args(parser):
                        help='Activate zero bubble pipeline parallelism schedule method')
     group.add_argument('--enable-zbh1-exact-semantics', action='store_true',
                        help='Use an exact semantics for zbh1 schedule, might be slower than the default.')
-
+    group.add_argument('--resume-iteration', type=int, default=0,
+                       help='Resume training from this iteration')
     # deprecated
     # HACK: added back arguments because DeepSpeed still relies on the old
     # activation checkpointing mechanism.
