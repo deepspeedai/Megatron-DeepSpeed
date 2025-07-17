@@ -298,10 +298,10 @@ class CoreAttention(MegatronModule):
                        key_layer.size(0))
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
-        query_layer = query_layer.view(output_size[2],
+        query_layer = query_layer.reshape(output_size[2],
                                        output_size[0] * output_size[1], -1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
-        key_layer = key_layer.view(output_size[3],
+        key_layer = key_layer.reshape(output_size[3],
                                    output_size[0] * output_size[1], -1)
 
         # preallocting input tensor: [b * np, sq, sk]
@@ -349,7 +349,7 @@ class CoreAttention(MegatronModule):
                        value_layer.size(3))
 
         # change view [sk, b * np, hn]
-        value_layer = value_layer.view(value_layer.size(0),
+        value_layer = value_layer.reshape(value_layer.size(0),
                                        output_size[0] * output_size[1], -1)
 
         # change view [b * np, sq, sk]
@@ -1654,7 +1654,7 @@ def get_num_experts_per_layer(num_experts: list, num_layers: int, expert_interva
         num_experts = num_experts * (num_layers // expert_interval)
     experts_per_layer = []
     for i in range(num_layers):
-        layer_num = i + 1 + offset
+        layer_num = i + 1 
         n_e = num_experts[(layer_num-1) // expert_interval] if layer_num % expert_interval == 0 else 1
         experts_per_layer.append(n_e)
     return experts_per_layer
