@@ -28,8 +28,9 @@ class RotaryEmbedding(nn.Module):
             raise RuntimeError("einops is required for Rotary Embedding")
 
     def forward(self, max_seq_len, offset=0):
-        seq = torch.arange(max_seq_len, device=self.inv_freq.device) + offset
-        freqs = einsum('i , j -> i j', seq.type_as(self.inv_freq), self.inv_freq)
+        seq = torch.arange(max_seq_len, device=self.inv_freq.device, dtype=torch.float) + offset
+        # Force float32 since bfloat16 loses precision on long contexts
+        freqs = einsum('i , j -> i j', seq, self.inv_freq.float())
         # first part even vector components, second part odd vector components,
         #  2 * dim in dimension size
         emb = torch.cat((freqs, freqs), dim=-1)
