@@ -544,6 +544,10 @@ class TransformerLanguageModel(MegatronModule):
             else:
                 if args.curriculum_learning_legacy or args.data_efficiency_curriculum_learning:
                     rotary_pos_emb = self.rotary_pos_emb(args.curriculum_seqlen)
+                elif args.ds_sequence_parallel_size > 1:
+                    parallel_seq_len = self.seq_length / args.ds_sequence_parallel_size
+                    ds_sp_offset =  mpu.get_sequence_parallel_rank() * parallel_seq_len
+                    rotary_pos_emb = self.rotary_pos_emb(parallel_seq_len, ds_sp_offset)
                 else:
                     rotary_pos_emb_cos, rotary_pos_emb_sin = self.rotary_pos_emb(self.seq_length)
                     rotary_pos_emb_cos.no_checkpointing = True
