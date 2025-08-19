@@ -39,6 +39,9 @@ class MegatronGradScaler(ABC):
 
 class ConstantGradScaler(MegatronGradScaler):
 
+    def __init__(self, initial_scale_power):
+        super().__init__(2**initial_scale_power)
+
     def update(self, found_inf):
         pass
 
