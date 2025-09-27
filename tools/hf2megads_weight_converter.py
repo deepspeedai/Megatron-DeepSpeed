@@ -5,6 +5,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch.distributed
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
+from torch.optim import Optimizer
 from megatron import print_rank_0, get_tokenizer, get_args
 from megatron.core import mpu
 from megatron.core import tensor_parallel
@@ -22,6 +23,21 @@ import deepspeed
 import copy
 from pathlib import Path
 
+
+class DummyOptimizerWithStateDict(Optimizer):
+    """Dummy optimizer that inherits from torch.optim.Optimizer and provides state_dict method"""
+    def __init__(self):
+        self.param_groups = []
+        self.state = {}
+
+    def step(self, closure=None):
+        pass
+
+    def state_dict(self):
+        return {'state': self.state, 'param_groups': self.param_groups}
+
+    def load_state_dict(self, state_dict):
+        pass
 
 
 def add_extra_args(parser):
@@ -504,9 +520,10 @@ def convert_ckpt():
 
     #init model and save
     print_rank_0(f"before deepspeed init")
+    dummy_optimizer = DummyOptimizerWithStateDict()
     ds_engine, _, _, _ = deepspeed.initialize(
         model=ds_model,
-        optimizer=None,
+        optimizer=dummy_optimizer,
         args=args,
         lr_scheduler=None,
         mpu=mpu if args.no_pipeline_parallel else None)
